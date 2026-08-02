@@ -75,7 +75,7 @@ is precisely what `watchlist_analyser` is for.
 1.5:1 against a 1.5×ATR stop is capped and demoted, however good its chart. Trend and entry
 price are separate questions, and the whole toolkit is built to keep them separate.
 
-> **A note on test coverage.** Only `stock_screener` has a test suite (1294 tests). The other
+> **A note on test coverage.** Only `stock_screener` has a test suite (1367 tests). The other
 > three predate it and have none. That matters most for `analyze.py`: three skills import
 > it, so a regression there would propagate silently with nothing to catch it.
 
@@ -221,6 +221,7 @@ python3 ~/.claude/skills/stock_screener/screener.py --setup breakout --strict
 python3 ~/.claude/skills/stock_screener/screener.py --setup leader --sector "Financial Services"
 python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv        # ./scans/scan_<date>.csv
 python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv --csv-per-setup  # + one file per setup
+python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv-dir /tmp/nsereports  # a new timestamped folder per run
 
 python3 ~/.claude/skills/watchlist_analyser/watchlist.py "TITAN,BEL,CHOLAFIN" --detail
 python3 ~/.claude/skills/stock_analyser/analyze.py FEDERALBNK
@@ -372,6 +373,8 @@ Dates in the file read `02-Aug-2026`, not `2026-08-02`, because Excel converts a
 to its internal serial and renders the cell as a bare number. The default *filename* stays
 ISO — `scans/scan_2026-08-02.csv` — so a directory of scans lists chronologically. The two
 formats serve a spreadsheet cell and a directory listing, and neither is right for both.
+The `--csv-dir` *folder* name is a third format that deliberately breaks the second rule;
+see below.
 
 `--append` writes the header only when the file is new or empty, and the `threshold_mode`
 column records `strict` or `loosened` so two differently-thresholded scans cannot be read
@@ -458,9 +461,70 @@ honest form of that. The combined file keeps the opposite rule for the opposite 
 scan that matched nothing anywhere *is* a finding and needs a headed, parseable file to say
 so.
 
-`--csv-per-setup` without `--csv` is a usage error rather than a silent no-op, because the
-per-setup files are named from the `--csv` path and alone the flag has no base to build on.
+`--csv-per-setup` without a destination is a usage error rather than a silent no-op, because
+the per-setup files are named from the combined file's path and alone the flag has no base
+to build on. Either `--csv` or `--csv-dir` supplies that base.
 One stderr line per file names it and its row count, so `--json` on stdout stays parseable.
+
+### `--csv-dir` keeps every run in its own timestamped folder
+
+`--csv-dir DIR` writes the scan into a **new subfolder of `DIR`** named
+`scan_<dd-mm-yy>_<HHMMSS>`, rather than to a path that the next run overwrites. `DIR` and
+any missing parents are created; if `DIR` exists as a file the run stops with a message
+naming it, before the scan runs. Inside the folder the combined file is always `scan.csv`, and `--csv-per-setup`
+adds `scan_<SETUP>.csv` beside it:
+
+```bash
+python3 stock_screener/screener.py --setup all --csv-dir /tmp/nsereports --csv-per-setup
+```
+
+```
+/tmp/nsereports/
+  scan_02-08-26_205134/        a scan at 20:51:34 on 2 August 2026
+    scan.csv                   the combined scan, always written
+    scan_COILED.csv            11 rows
+    scan_LEADER.csv             7 rows
+    scan_CONFLUENCE.csv         4 rows
+  scan_02-08-26_205207/        a second scan 33 seconds later, untouched by the first
+    scan.csv
+    ...
+```
+
+The file inside is undated because the **folder** carries the stamp;
+`scan_02-08-26_205134/scan_02-08-26_205134.csv` says it twice. The per-setup rules are
+unchanged — a setup that matched nothing writes no file, and the combined file is written
+even when nothing matched anywhere.
+
+The **seconds** are load-bearing: two scans in the same minute would otherwise resolve to
+one folder and the second would silently write over the first.
+
+The folder name is `dd-mm-yy` and therefore **does not sort chronologically**. That inverts
+the filename rule above — the ISO filename exists precisely so a directory of scans lists in
+date order — and it is a deliberate choice made at explicit request rather than an
+oversight. `scan_02-08-26` sorts next to `scan_02-09-25`, a folder from a different year;
+changing `TIMESTAMP_DIR_FORMAT` in `csv_export.py` to `%y-%m-%d_%H%M%S` would restore the
+ordering and change nothing else. The three formats and their three jobs:
+
+| Where | Format | Why |
+|---|---|---|
+| Date **cells** in the file | `02-Aug-2026` | Excel renders an ISO date as a serial number |
+| `--csv` **filename** | `scan_2026-08-02.csv` | A directory of scans lists in date order |
+| `--csv-dir` **folder** | `scan_02-08-26_205134` | The order it was asked to be read in |
+
+Two pairings are usage errors rather than silent behaviour. **`--csv-dir` with `--csv`, in
+either form**, because one names a file and the other a directory: there is no way to honour
+both, and silently preferring one would exit 0 having put the scan where nobody is looking.
+**`--csv-dir` with `--append`**, because the folder was created a moment earlier and is
+empty, so accepting the flag would imply a history is accumulating when every run starts a
+new folder — `--csv PATH --append` is the growing log.
+
+The created folder is announced before the files, all on stderr:
+
+```
+created /tmp/nsereports/scan_02-08-26_205134
+wrote 62 rows to /tmp/nsereports/scan_02-08-26_205134/scan.csv
+wrote 11 rows to /tmp/nsereports/scan_02-08-26_205134/scan_COILED.csv
+```
 
 ## Architecture
 
@@ -471,9 +535,10 @@ stock_screener/
   universe.py     universe parsing, sector filter, NSE constituent refresh
   setups.py       six setup predicates, fit scoring, confluence
   screener.py     parallel scan, ranking, rendering, CLI
-  csv_export.py   long-format CSV export: self-describing headers, per-setup split
+  csv_export.py   long-format CSV export: self-describing headers, per-setup
+                  split, timestamped per-run folders
   nifty500.txt    500 symbols with sectors, refreshable from NSE
-  tests/          1294 tests
+  tests/          1367 tests
 
 stock_analyser/   analyze.py (the scoring engine), levels.py (nine-method S/R)
 watchlist_analyser/  watchlist.py (comparative scoring, relative strength)
@@ -507,7 +572,7 @@ India coverage. They silently rewrite the exchange, return no data, and then rep
 cd stock_screener && python3 -m unittest discover -s tests
 ```
 
-1294 tests, no third-party test runner. Beyond the usual coverage, the suite is
+1367 tests, no third-party test runner. Beyond the usual coverage, the suite is
 **mutation-verified**: for each assertion, a deliberately wrong implementation was patched
 in and the test confirmed to fail. That practice exists because it caught things ordinary
 testing did not — including a predicate that could never match while all of its tests

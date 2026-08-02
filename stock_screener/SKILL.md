@@ -41,7 +41,9 @@ is fine for a live quote cross-check.
    Add `--csv` when the user wants the matches in a file — to sort in a spreadsheet, to
    diff against yesterday's scan, or to keep a record. It costs nothing extra: the scan
    already ran. Add `--csv-per-setup` alongside it when they want each setup in its own
-   file rather than one file to filter.
+   file rather than one file to filter. Use `--csv-dir DIR` instead of `--csv` when they
+   want every run kept separately — it puts this scan's reports in a new timestamped
+   folder under `DIR` rather than writing over yesterday's file.
 3. Write up the output using the contract below.
 
 **Do not call `analyze.py` per name afterwards.** The screener's job ends at the shortlist;
@@ -117,6 +119,7 @@ python3 <skill-dir>/screener.py --setup all --csv               # ./scans/scan_<
 python3 <skill-dir>/screener.py --setup coiled --csv picks.csv  # exactly that path
 python3 <skill-dir>/screener.py --setup all --csv log.csv --append   # keep a history
 python3 <skill-dir>/screener.py --setup all --csv --csv-per-setup    # + one file per setup
+python3 <skill-dir>/screener.py --setup all --csv-dir /tmp/nsereports # a new folder per run
 ```
 
 ### CSV headers are self-describing — a standing constraint
@@ -157,6 +160,8 @@ file is read cold.
 - **Dates read `02-Aug-2026`, not `2026-08-02`.** Excel turns an ISO date into its internal
   serial and shows a bare number. The default *filename* stays ISO
   (`scans/scan_2026-08-02.csv`) on purpose, so a directory of scans lists chronologically.
+  The `--csv-dir` *folder* name is a third format and deliberately breaks that second rule —
+  see below.
 - **`all_setups_matched` and `setups_matched_count` are on every row**, so a COILED row
   shows the stock is also a LEADER without joining the file to itself.
 - **Values are raw numbers** — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"`; `pos_in_base`
@@ -253,6 +258,75 @@ Three rules:
 
 One stderr line per file names it and its row count, so `--json` on stdout stays parseable.
 
+### `--csv-dir` — a new timestamped folder per run
+
+`--csv-dir DIR` writes this scan's reports into a **new subfolder of `DIR`**, named
+`scan_<dd-mm-yy>_<HHMMSS>`. Use it when the user wants every run kept rather than one file
+overwritten or one log appended to. `DIR` and any missing parents are created; if `DIR`
+already exists as a *file* the run stops with a message naming it, before the scan runs.
+
+Inside the folder the combined file is always `scan.csv`, and `--csv-per-setup` adds
+`scan_<SETUP>.csv` beside it:
+
+```bash
+python3 <skill-dir>/screener.py --setup all --csv-dir /tmp/nsereports --csv-per-setup
+```
+
+```
+/tmp/nsereports/
+  scan_02-08-26_205134/        a scan at 20:51:34 on 2 August 2026
+    scan.csv                   the combined scan, always written
+    scan_COILED.csv            11 rows
+    scan_LEADER.csv             7 rows
+    scan_CONFLUENCE.csv         4 rows
+  scan_02-08-26_205207/        a second scan 33 seconds later, untouched by the first
+    scan.csv
+    ...
+```
+
+The filename inside the folder is undated because the **folder** carries the stamp —
+`scan_02-08-26_205134/scan_02-08-26_205134.csv` would say it twice. The existing per-setup
+rules are unchanged: a setup that matched nothing writes no file at all, and the combined
+file is written even when nothing matched anywhere.
+
+**The seconds are load-bearing.** Two scans in the same minute would otherwise resolve to
+one folder and the second would write over the first, with no error and no way to tell
+afterwards which scan the folder holds.
+
+**The folder name is `dd-mm-yy` and therefore does not sort chronologically.** That inverts
+the rule two sections up — the ISO *filename* exists precisely so a directory of scans lists
+in date order — and it is a deliberate choice made at the user's explicit request, not an
+oversight. The cost is real: `scan_02-08-26` sorts next to `scan_02-09-25`, a folder from a
+different year. Changing `TIMESTAMP_DIR_FORMAT` in `csv_export.py` to `%y-%m-%d_%H%M%S`
+would restore chronological sorting and change nothing else. The three formats and their
+three jobs, in one place:
+
+| Where | Format | Why |
+|---|---|---|
+| Date **cells** in the file | `02-Aug-2026` | Excel renders an ISO date as a serial number |
+| `--csv` **filename** | `scan_2026-08-02.csv` | A directory of scans lists in date order |
+| `--csv-dir` **folder** | `scan_02-08-26_205134` | The order the user asked to read it in |
+
+Two pairings are usage errors rather than silent behaviour:
+
+- **`--csv-dir` with `--csv` (in either form).** One names a file and the other names a
+  directory; there is no way to honour both, and silently preferring one would put the scan
+  somewhere the user is not looking while exiting 0. `--csv-dir` on its own is sufficient —
+  it satisfies `--csv-per-setup` too, and does not additionally require `--csv`.
+- **`--csv-dir` with `--append`.** The folder was created a moment earlier and is empty, so
+  there is nothing in it to append to. Accepting the flag would imply a history is
+  accumulating when each run starts a new folder. Use `--csv PATH --append` for a growing
+  log.
+
+The created folder is printed first, then the usual one line per file — all on stderr, so
+`--json` on stdout stays parseable:
+
+```
+created /tmp/nsereports/scan_02-08-26_205134
+wrote 62 rows to /tmp/nsereports/scan_02-08-26_205134/scan.csv
+wrote 11 rows to /tmp/nsereports/scan_02-08-26_205134/scan_COILED.csv
+```
+
 ### When the user asks for brevity
 
 Brevity drops the per-setup tables down to the top 5 rows each. It never removes a column,
@@ -321,6 +395,9 @@ the key, the FAILED list, or the breadth read.
 | Expecting `--top` to change the CSV | It governs the terminal only; the file's own cap is 20 per setup |
 | Shortening a CSV header to match the terminal's label | Headers are self-describing by contract; the unit lives in the name |
 | Reading a missing `scan_<date>_TURN.csv` as a failed export | No file means that setup matched nothing; the combined file is always written |
+| Passing `--csv` and `--csv-dir` together | Usage error — one names a file, the other a directory; `--csv-dir` alone is sufficient |
+| Passing `--append` with `--csv-dir` | Usage error — the folder is new and empty every run, so there is nothing to append to |
+| Reading `--csv-dir` folders as chronologically sorted | The folder name is `dd-mm-yy` by request; only the `--csv` filename is ISO |
 | Reading a short PULLBACK list as a data problem | It waits for a reversal at support; most dips do not have one |
 | Appending scans with different `--strict` settings and reading them as one | The `threshold_mode` column is there to keep them apart |
 | Reporting a sub-1.0 `Up/Down Volume Ratio` without comment | The price chart and the volume disagree, and only the reader can weigh that |

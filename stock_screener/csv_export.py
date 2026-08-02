@@ -234,6 +234,100 @@ def date_cell(value):
         return text
 
 
+# The timestamped OUTPUT FOLDER under --csv-dir: `scan_02-08-26_205134`.
+#
+# READ THIS TOGETHER WITH THE COMMENT ABOVE DATE_FORMAT. It inverts the decision
+# recorded there, deliberately and at the user's explicit request, and it is
+# written down here so a future reader sees a decision rather than an
+# inconsistency someone missed.
+#
+# The rule above is that the FILENAME stays ISO -- `scan_2026-08-02.csv` --
+# precisely so a directory of scans lists in date order, while the in-file date
+# CELLS read `02-Aug-2026` so Excel does not render the column as a serial
+# number. Two formats, two jobs, neither right for both.
+#
+# This FOLDER name is a third case and it does NOT sort chronologically.
+# `scan_02-08-26` sorts next to `scan_02-09-25` -- a folder from a different
+# year -- which is exactly the failure the ISO filename exists to avoid. That
+# cost is accepted here because `dd-mm-yy` is the order the user asked to read
+# these folder names in, and the folders are opened by name rather than scanned
+# down a listing. Swapping this one constant to "%y-%m-%d_%H%M%S" would restore
+# chronological sorting and change nothing else: nothing parses this format
+# back, and the seconds component is independent of the field order.
+#
+# The SECONDS are load-bearing, not decoration. Without them two scans in the
+# same minute resolve to the same folder name, and the second run writes its
+# files over the first's with no error raised and no way to tell afterwards
+# which of the two scans the directory holds.
+TIMESTAMP_DIR_FORMAT = "%d-%m-%y_%H%M%S"
+
+# The combined file's name INSIDE a --csv-dir folder. Fixed, and deliberately
+# not dated: the folder already carries the timestamp, and dating the file too
+# would give `scan_02-08-26_205134/scan_02-08-26_205134.csv`. The per-setup
+# siblings are named off this by per_setup_path, so they land beside it as
+# `scan_COILED.csv` -- the same _<SETUP> rule the --csv path uses, applied to a
+# base that has nothing else in it.
+COMBINED_NAME = "scan.csv"
+
+
+def now():
+    """The wall clock, behind a seam.
+
+    Here rather than inline in make_scan_dir so a test can pin the instant and
+    assert the exact folder name. A writer that called datetime.now() itself
+    could only be tested by sleeping between two runs and comparing them, which
+    proves the name changes but never proves WHICH fields it is built from: a
+    transposed day and month, or a dropped seconds component, is invisible to
+    that test and both are mistakes this format can make.
+    """
+    return dt.datetime.now()
+
+
+def scan_dir_name(when):
+    """A datetime -> `scan_02-08-26_205134`. See TIMESTAMP_DIR_FORMAT."""
+    return "scan_" + when.strftime(TIMESTAMP_DIR_FORMAT)
+
+
+def make_scan_dir(base_dir, when):
+    """Create `base_dir/scan_<dd-mm-yy>_<HHMMSS>` and return its path.
+
+    `base_dir` and any missing parents are created too, so `--csv-dir
+    ~/reports/nse/2026` works on a machine that has none of those directories:
+    a run that refused because an intermediate folder was missing would be
+    asking the user to do by hand what the flag exists to do.
+
+    `base_dir` existing as a FILE is a usage error naming the path, not a
+    traceback. It is the plausible typo -- `--csv-dir scan.csv` -- and the
+    OSError it would otherwise raise names an internal path built from the
+    timestamp rather than the argument the user typed.
+
+    `exist_ok=True` because the ordinary case is a `base_dir` that already
+    holds earlier scans: the timestamped leaf is new every run, but every
+    directory above it is not, and makedirs without it would fail on the second
+    scan into the same directory.
+    """
+    if os.path.exists(base_dir) and not os.path.isdir(base_dir):
+        raise SystemExit(
+            "ERROR: --csv-dir %s exists as a file, not a directory. --csv-dir "
+            "names a directory to create this scan's folder in; --csv names a "
+            "file to write." % base_dir)
+    path = os.path.join(base_dir, scan_dir_name(when))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        # A parent of base_dir that is itself a file lands here rather than in
+        # the check above, which can only see base_dir. Naming the path keeps
+        # the message actionable instead of an errno.
+        raise SystemExit("ERROR: could not create the scan folder %s: %s"
+                         % (path, exc))
+    return path
+
+
+def combined_path(scan_dir):
+    """The scan folder -> the combined file inside it."""
+    return os.path.join(scan_dir, COMBINED_NAME)
+
+
 def universe_label(path):
     """`/x/y/nifty500.txt` -> `nifty500`. The universe, not the file it lives in."""
     return os.path.splitext(os.path.basename(path))[0]

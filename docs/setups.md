@@ -700,3 +700,80 @@ a close above the base high, 500 failed" — rather than reporting a bare zero. 
 returns nothing is telling you what the market is doing.
 
 The screener will not pad a list to fill 15 rows.
+
+### Where the scan is written
+
+Three flags name a destination, and they are three different answers to "what happens to
+yesterday's scan".
+
+| Flag | Writes | Yesterday's scan |
+|---|---|---|
+| `--csv` | `./scans/scan_<date>.csv`, or the path you give it | Overwritten, unless the date in the default name has changed |
+| `--csv PATH --append` | The same file, rows added, header written once | Kept, in the same file |
+| `--csv-dir DIR` | `DIR/scan_<dd-mm-yy>_<HHMMSS>/scan.csv` | Kept, in its own folder |
+
+`--csv-per-setup` composes with any of them and *also* writes one file per setup that
+matched — `scan_<date>_COILED.csv` under `--csv`, `scan_COILED.csv` inside a `--csv-dir`
+folder. A setup that matched nothing writes no file at all; the combined file is written
+even when nothing matched anywhere, because a scan that found nothing is itself a finding
+and needs a headed, parseable file to say so.
+
+`--csv-dir` creates `DIR` and any missing parents, then a new subfolder for this run:
+
+```bash
+python3 stock_screener/screener.py --setup all --csv-dir /tmp/nsereports --csv-per-setup
+```
+
+```
+/tmp/nsereports/
+  scan_02-08-26_205134/        a scan at 20:51:34 on 2 August 2026
+    scan.csv                   the combined scan, always written
+    scan_COILED.csv            11 rows
+    scan_LEADER.csv             7 rows
+    scan_CONFLUENCE.csv         4 rows
+  scan_02-08-26_205207/        a second scan 33 seconds later, untouched by the first
+    scan.csv
+    ...
+```
+
+The **seconds** in the folder name are load-bearing, not decoration: without them two scans
+in the same minute resolve to one folder and the second writes over the first, with no error
+raised and no way to tell afterwards which of the two the folder holds.
+
+The folder name is `dd-mm-yy`, so a listing of these folders **does not sort
+chronologically** — `scan_02-08-26` sorts next to `scan_02-09-25`, a folder from a different
+year. That inverts the rule the CSV *filename* follows, where ISO is used precisely so a
+directory of scans lists in date order, and it is a deliberate choice made at explicit
+request rather than an inconsistency nobody noticed. Changing `TIMESTAMP_DIR_FORMAT` in
+`csv_export.py` to `%y-%m-%d_%H%M%S` would restore the ordering and change nothing else.
+Three formats, three jobs:
+
+| Where | Format | Why |
+|---|---|---|
+| Date **cells** in the file | `02-Aug-2026` | Excel renders an ISO date as a serial number |
+| `--csv` **filename** | `scan_2026-08-02.csv` | A directory of scans lists in date order |
+| `--csv-dir` **folder** | `scan_02-08-26_205134` | The order it was asked to be read in |
+
+Two pairings stop with a usage error rather than doing something surprising:
+
+- **`--csv-dir` together with `--csv`**, in either of `--csv`'s forms. One names a file and
+  the other names a directory, so there is no way to honour both — and silently preferring
+  one would exit 0 having written the scan somewhere the user is not looking. `--csv-dir`
+  needs no `--csv`; it satisfies `--csv-per-setup` on its own.
+- **`--csv-dir` together with `--append`**. The folder was created seconds earlier and is
+  empty, so there is nothing inside it to append to. Accepting the flag would suggest a
+  history is accumulating when in fact every run starts a new folder. `--csv PATH --append`
+  is the flag pair that keeps one growing file.
+
+If `DIR` exists as a file rather than a directory the run stops before the scan, with a
+message naming the path — `--csv-dir scan.csv` is the plausible typo, and an errno from inside the directory
+creation would name a path built from the timestamp rather than the argument that was typed.
+
+The created folder is printed before the per-file lines, and all of them go to stderr so
+`--json` on stdout stays parseable:
+
+```
+created /tmp/nsereports/scan_02-08-26_205134
+wrote 62 rows to /tmp/nsereports/scan_02-08-26_205134/scan.csv
+wrote 11 rows to /tmp/nsereports/scan_02-08-26_205134/scan_COILED.csv
+```

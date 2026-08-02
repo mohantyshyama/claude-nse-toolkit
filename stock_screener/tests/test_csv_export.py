@@ -1211,6 +1211,282 @@ class TestResolvePath(unittest.TestCase):
                       csv_export.default_path("2026-08-02"))
 
 
+# --------------------------------------------------- --csv-dir, timestamped
+
+# The fixture instant, chosen so that EVERY field is distinguishable from every
+# other: day 2, month 8, year 26, hour 20, minute 51, second 34 -- six different
+# numbers. A fixture like 01-01-01 01:01:01 cannot tell a correct format from
+# one that transposed the day and the month, and a fixture whose seconds happen
+# to be :00 cannot tell `%H%M%S` from `%H%M` because both render the same six
+# characters some of the time and the test would pass on the day it was written.
+STAMP = dt.datetime(2026, 8, 2, 20, 51, 34)
+STAMP_NAME = "scan_02-08-26_205134"
+
+# A second instant with no field in common with the first, and with four
+# single-digit fields, so zero padding is pinned rather than assumed: day 9,
+# month 11, year 25, hour 3, minute 7, second 5.
+STAMP_2 = dt.datetime(2025, 11, 9, 3, 7, 5)
+STAMP_2_NAME = "scan_09-11-25_030705"
+
+
+class TestScanDirName(unittest.TestCase):
+    """The folder name under --csv-dir. Asserted as exact strings off a pinned
+    clock, because every interesting mistake here -- a transposed field, a
+    dropped seconds component, an unpadded number -- still produces a
+    plausible-looking name."""
+
+    def test_the_name_is_the_documented_shape(self):
+        self.assertEqual(csv_export.scan_dir_name(STAMP), STAMP_NAME)
+
+    def test_a_second_unrelated_instant_lands_in_the_same_shape(self):
+        """Not the same numbers as the first: a format hard-coded to the
+        fixture, or one reading a field it should not, differs here."""
+        self.assertEqual(csv_export.scan_dir_name(STAMP_2), STAMP_2_NAME)
+
+    def test_the_date_part_is_day_month_year_in_that_order(self):
+        """The naming decision this inverts. `yy-mm-dd` would read
+        `26-08-02` and sort chronologically; `dd-mm-yy` reads `02-08-26` and
+        does not, which is the documented, deliberate trade."""
+        date_part = STAMP_NAME.split("_")[1]
+        self.assertEqual(csv_export.scan_dir_name(STAMP).split("_")[1],
+                         date_part)
+        self.assertEqual(date_part.split("-"), ["02", "08", "26"])
+
+    def test_it_is_not_the_iso_ordering_the_filename_uses(self):
+        """Stated as its own assertion so the inversion is visible in the suite
+        and not only in the comment: the FILE keeps ISO, the FOLDER does not."""
+        self.assertNotEqual(csv_export.scan_dir_name(STAMP),
+                            "scan_" + STAMP.strftime("%y-%m-%d_%H%M%S"))
+        self.assertNotEqual(csv_export.scan_dir_name(STAMP),
+                            "scan_" + STAMP.strftime("%Y-%m-%d_%H%M%S"))
+
+    def test_the_year_is_two_digits_not_four(self):
+        self.assertNotIn("2026", csv_export.scan_dir_name(STAMP))
+        self.assertIn("-26_", csv_export.scan_dir_name(STAMP))
+
+    def test_the_time_part_is_six_digits_hours_minutes_seconds(self):
+        """The seconds component, asserted on its own: a name built with
+        `%H%M` is four digits and every other assertion about `205134` would
+        have to be rewritten to notice, which is how a dropped field survives."""
+        time_part = csv_export.scan_dir_name(STAMP).split("_")[2]
+        self.assertEqual(len(time_part), 6, time_part)
+        self.assertTrue(time_part.isdigit(), time_part)
+        self.assertEqual(time_part, "205134")
+        self.assertTrue(time_part.endswith("34"), time_part)
+
+    def test_single_digit_fields_are_zero_padded(self):
+        """`9-11-25_3705` would sort and read wrong, and two such names can
+        collide -- 03:07:05 and 03:07:5x are not distinguishable unpadded."""
+        for part in STAMP_2_NAME.replace("scan_", "").replace("_", "-").split("-"):
+            self.assertEqual(len(part), 2 if len(part) < 6 else 6, part)
+        self.assertEqual(csv_export.scan_dir_name(STAMP_2), STAMP_2_NAME)
+
+    def test_two_scans_in_the_same_minute_do_not_collide(self):
+        """The reason the seconds are there at all. Same day, same hour, same
+        minute -- and a format without `%S` gives both runs one folder, the
+        second silently overwriting the first."""
+        a = csv_export.scan_dir_name(dt.datetime(2026, 8, 2, 20, 51, 34))
+        b = csv_export.scan_dir_name(dt.datetime(2026, 8, 2, 20, 51, 59))
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, "scan_02-08-26_205134")
+        self.assertEqual(b, "scan_02-08-26_205159")
+
+    def test_every_one_of_the_six_fields_reaches_the_name(self):
+        """Six single-field bumps off one base instant. A format missing ANY
+        component -- year, month, day, hour, minute or second -- collapses that
+        pair into one name, and the folder for two different scans becomes one
+        folder holding whichever ran last."""
+        base = dt.datetime(2026, 8, 2, 20, 51, 34)
+        bumped = {
+            "year": base.replace(year=2027),
+            "month": base.replace(month=9),
+            "day": base.replace(day=3),
+            "hour": base.replace(hour=21),
+            "minute": base.replace(minute=52),
+            "second": base.replace(second=35),
+        }
+        for field, when in bumped.items():
+            with self.subTest(field=field):
+                self.assertNotEqual(csv_export.scan_dir_name(when),
+                                    csv_export.scan_dir_name(base), field)
+
+    def test_the_name_is_prefixed_scan_like_the_files(self):
+        self.assertTrue(csv_export.scan_dir_name(STAMP).startswith("scan_"))
+
+    def test_the_name_is_a_bare_folder_name_with_no_separator_in_it(self):
+        """It is joined onto --csv-dir by make_scan_dir; a separator here would
+        silently nest a second level."""
+        self.assertNotIn(os.sep, csv_export.scan_dir_name(STAMP))
+        self.assertNotIn("/", csv_export.scan_dir_name(STAMP))
+
+
+class TestNowSeam(unittest.TestCase):
+    """The clock is a function so a test can pin it. Without the seam the only
+    way to test the folder name is to sleep and compare two runs, which cannot
+    see a transposed or missing field."""
+
+    def test_it_returns_a_datetime_carrying_a_time_of_day(self):
+        got = csv_export.now()
+        self.assertIsInstance(got, dt.datetime)
+
+    def test_it_reads_the_wall_clock(self):
+        before = dt.datetime.now()
+        got = csv_export.now()
+        after = dt.datetime.now()
+        self.assertLessEqual(before, got)
+        self.assertLessEqual(got, after)
+
+    def test_replacing_it_changes_the_folder_a_scan_creates(self):
+        """The seam really is the one make_scan_dir's caller uses -- proved by
+        substituting it, not by reading the source."""
+        with tmpdir() as d:
+            got = csv_export.make_scan_dir(d, csv_export.now())
+            self.assertTrue(os.path.isdir(got))
+            self.assertNotEqual(os.path.basename(got), STAMP_NAME)
+            pinned = csv_export.make_scan_dir(d, STAMP)
+            self.assertEqual(os.path.basename(pinned), STAMP_NAME)
+
+
+class TestMakeScanDir(unittest.TestCase):
+    def test_it_creates_the_timestamped_folder_and_returns_its_path(self):
+        with tmpdir() as d:
+            got = csv_export.make_scan_dir(os.path.join(d, "reports"), STAMP)
+            self.assertEqual(got, os.path.join(d, "reports", STAMP_NAME))
+            self.assertTrue(os.path.isdir(got))
+
+    def test_the_folder_is_INSIDE_the_directory_not_the_directory_itself(self):
+        """The mutant this kills returns base_dir and writes the reports
+        straight into it: every file assertion downstream still passes, and the
+        timestamped folder simply never exists."""
+        with tmpdir() as d:
+            base = os.path.join(d, "reports")
+            got = csv_export.make_scan_dir(base, STAMP)
+            self.assertNotEqual(got, base)
+            self.assertEqual(os.path.dirname(got), base)
+            self.assertEqual(os.path.basename(got), STAMP_NAME)
+            self.assertEqual(os.listdir(base), [STAMP_NAME])
+
+    def test_missing_parents_are_created_all_the_way_down(self):
+        """`--csv-dir ~/reports/nse/2026` on a machine with none of those."""
+        with tmpdir() as d:
+            base = os.path.join(d, "a", "b", "c")
+            got = csv_export.make_scan_dir(base, STAMP)
+            self.assertTrue(os.path.isdir(got))
+            self.assertTrue(os.path.isdir(base))
+
+    def test_a_directory_that_already_exists_is_reused_not_rejected(self):
+        """The other arm of the parent handling, and the ordinary case: the
+        second scan of the day into the same --csv-dir, whose directory is
+        already there from the first."""
+        with tmpdir() as d:
+            base = os.path.join(d, "reports")
+            os.makedirs(base)
+            got = csv_export.make_scan_dir(base, STAMP)
+            self.assertTrue(os.path.isdir(got))
+
+    def test_a_scan_folder_that_already_exists_is_reused_not_fatal(self):
+        """Two scans inside ONE second resolve to the same folder name. That is
+        outside the collision the seconds component prevents -- its guarantee is
+        that two scans in the same MINUTE get different folders -- but it is
+        reachable, and by the time this runs the scan has already completed.
+        Failing here throws finished work away over a name clash, so the leaf is
+        created with `exist_ok=True`.
+
+        This is the assertion `os.makedirs(path)` fails and the pre-existing
+        PARENT case does not: makedirs creates intermediate directories itself,
+        so only an existing LEAF raises FileExistsError."""
+        with tmpdir() as d:
+            first = csv_export.make_scan_dir(d, STAMP)
+            again = csv_export.make_scan_dir(d, STAMP)
+            self.assertEqual(again, first)
+            self.assertTrue(os.path.isdir(again))
+            self.assertEqual(os.listdir(d), [STAMP_NAME])
+
+    def test_two_scans_land_in_two_sibling_folders_both_kept(self):
+        with tmpdir() as d:
+            first = csv_export.make_scan_dir(d, STAMP)
+            second = csv_export.make_scan_dir(d, STAMP_2)
+            self.assertNotEqual(first, second)
+            self.assertTrue(os.path.isdir(first))
+            self.assertTrue(os.path.isdir(second))
+            self.assertEqual(sorted(os.listdir(d)),
+                             sorted([STAMP_NAME, STAMP_2_NAME]))
+
+    def test_the_new_folder_starts_empty(self):
+        """It creates a directory and writes nothing; the caller writes."""
+        with tmpdir() as d:
+            self.assertEqual(os.listdir(csv_export.make_scan_dir(d, STAMP)), [])
+
+    def test_a_directory_argument_that_is_really_a_file_is_a_usage_error(self):
+        """`--csv-dir scan.csv` is the plausible typo. It must name the path,
+        not raise an errno from somewhere inside makedirs."""
+        with tmpdir() as d:
+            path = os.path.join(d, "notadir.csv")
+            open(path, "w").close()
+            with self.assertRaises(SystemExit) as cm:
+                csv_export.make_scan_dir(path, STAMP)
+            msg = str(cm.exception)
+            self.assertIn(path, msg)
+            self.assertIn("file", msg)
+            self.assertIn("director", msg)
+
+    def test_the_file_case_creates_nothing_at_all(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "notadir.csv")
+            open(path, "w").close()
+            with self.assertRaises(SystemExit):
+                csv_export.make_scan_dir(path, STAMP)
+            self.assertEqual(os.listdir(d), ["notadir.csv"])
+            self.assertTrue(os.path.isfile(path))
+
+    def test_a_parent_that_is_a_file_is_a_usage_error_naming_the_path(self):
+        """The check above can only see base_dir itself; a file one level up
+        surfaces from makedirs and must still arrive as a message, not a
+        traceback."""
+        with tmpdir() as d:
+            blocker = os.path.join(d, "blocker")
+            open(blocker, "w").close()
+            with self.assertRaises(SystemExit) as cm:
+                csv_export.make_scan_dir(os.path.join(blocker, "sub"), STAMP)
+            self.assertIn(blocker, str(cm.exception))
+
+    def test_an_ordinary_directory_is_not_mistaken_for_a_file(self):
+        """The other arm of the same guard: the guard must reject a file and
+        must not reject the case the flag exists for."""
+        with tmpdir() as d:
+            got = csv_export.make_scan_dir(d, STAMP)
+            self.assertTrue(os.path.isdir(got))
+
+    def test_a_relative_directory_resolves_against_the_working_directory(self):
+        with tmpdir() as d, chdir(d):
+            got = csv_export.make_scan_dir("nsereports", STAMP)
+            self.assertEqual(got, os.path.join("nsereports", STAMP_NAME))
+            self.assertTrue(os.path.isdir(os.path.join(d, "nsereports",
+                                                       STAMP_NAME)))
+
+
+class TestCombinedPath(unittest.TestCase):
+    def test_the_combined_file_sits_inside_the_scan_folder(self):
+        self.assertEqual(csv_export.combined_path("/x/scan_02-08-26_205134"),
+                         "/x/scan_02-08-26_205134/scan.csv")
+
+    def test_the_name_is_undated_because_the_folder_carries_the_stamp(self):
+        """`scan_02-08-26_205134/scan_02-08-26_205134.csv` says it twice."""
+        self.assertEqual(csv_export.COMBINED_NAME, "scan.csv")
+        self.assertNotIn("02-08-26",
+                         os.path.basename(
+                             csv_export.combined_path("/x/scan_02-08-26_205134")))
+
+    def test_the_per_setup_siblings_are_named_from_it(self):
+        """`scan.csv` + COILED -> `scan_COILED.csv`, the shape the flag
+        documents, reusing the one per_setup_path rule rather than a second."""
+        combined = csv_export.combined_path("/x/scan_02-08-26_205134")
+        self.assertEqual(csv_export.per_setup_path(combined, "COILED"),
+                         "/x/scan_02-08-26_205134/scan_COILED.csv")
+        self.assertEqual(csv_export.per_setup_path(combined, "CONFLUENCE"),
+                         "/x/scan_02-08-26_205134/scan_CONFLUENCE.csv")
+
+
 # -------------------------------------------------------------- per-setup split
 
 class TestPerSetupPath(unittest.TestCase):
@@ -2073,6 +2349,495 @@ class TestMainCsvPerSetup(unittest.TestCase):
             self.assertNotEqual(cm.exception.code, 0)
             self.assertIn("requires --csv", buf.getvalue())
             self.assertEqual(os.listdir(d), [])
+
+
+class TestCsvDirArgs(unittest.TestCase):
+    def test_it_defaults_to_none_so_no_folder_is_created(self):
+        self.assertIsNone(screener.parse_args([]).csv_dir)
+
+    def test_it_takes_a_directory(self):
+        self.assertEqual(screener.parse_args(["--csv-dir", "/tmp/nse"]).csv_dir,
+                         "/tmp/nse")
+
+    def test_it_composes_with_the_scan_flags(self):
+        a = screener.parse_args(["--csv-dir", "/tmp/nse", "--setup", "coiled",
+                                 "--sector", "Banks", "--strict", "--top", "3",
+                                 "--json", "--min-turnover", "8.5"])
+        self.assertEqual(a.csv_dir, "/tmp/nse")
+        self.assertTrue(a.strict)
+        self.assertTrue(a.json)
+        self.assertEqual(a.setup, "coiled")
+        self.assertIsNone(a.csv)
+
+    def test_a_directory_that_is_really_a_file_is_rejected_at_parse_time(self):
+        """Read-only, so it costs nothing to ask before the scan rather than
+        after it. make_scan_dir keeps its own guard for callers that skip the
+        CLI; this one exists so a typo does not cost 23 seconds of scan."""
+        with tmpdir() as d:
+            blocker = os.path.join(d, "notadir.csv")
+            open(blocker, "w").close()
+            buf = io.StringIO()
+            with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+                screener.parse_args(["--csv-dir", blocker])
+            self.assertNotEqual(cm.exception.code, 0)
+            self.assertIn(blocker, buf.getvalue())
+            self.assertIn("not a directory", buf.getvalue())
+
+    def test_an_existing_directory_is_accepted(self):
+        """The other arm: the guard must reject a file and must not reject the
+        ordinary second scan into a directory that is already there."""
+        with tmpdir() as d:
+            self.assertEqual(screener.parse_args(["--csv-dir", d]).csv_dir, d)
+
+    def test_a_directory_that_does_not_exist_yet_is_accepted(self):
+        """The third arm, and the one the flag exists for: --csv-dir creates
+        DIR and its missing parents, so requiring it to exist would defeat it."""
+        with tmpdir() as d:
+            missing = os.path.join(d, "a", "b", "c")
+            self.assertEqual(screener.parse_args(["--csv-dir", missing]).csv_dir,
+                             missing)
+
+    def test_the_help_text_names_the_flag_and_the_folder_shape(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit):
+            screener.parse_args(["--help"])
+        text = buf.getvalue()
+        self.assertIn("--csv-dir", text)
+        # Whitespace stripped entirely: argparse rewraps help text to the
+        # terminal width and will happily break `dd-mm-yy` across two lines,
+        # which says nothing about whether the flag is documented.
+        squashed = "".join(text.split())
+        self.assertIn("scan_<dd-mm-yy>_<HHMMSS>", squashed)
+        self.assertIn("mutuallyexclusivewith--csv", squashed)
+
+
+class TestCsvDirVersusCsv(unittest.TestCase):
+    """One names a file, the other a directory. Both is a usage error."""
+
+    def _err(self, argv):
+        buf = io.StringIO()
+        with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            screener.parse_args(argv)
+        return cm.exception.code, buf.getvalue()
+
+    def test_csv_dir_with_an_explicit_csv_path_is_a_usage_error(self):
+        """The mutant this kills silently prefers one of the two: exit 0, a
+        scan that ran, and the files in whichever place the code checked
+        first -- which is the place the user will not look."""
+        code, err = self._err(["--csv-dir", "/tmp/nse", "--csv", "/tmp/o.csv"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("--csv", err)
+        self.assertIn("--csv-dir", err)
+
+    def test_the_error_explains_that_one_is_a_file_and_one_a_directory(self):
+        _, err = self._err(["--csv-dir", "/tmp/nse", "--csv", "/tmp/o.csv"])
+        self.assertIn("mutually exclusive", err)
+        self.assertIn("FILE", err)
+        self.assertIn("DIRECTORY", err)
+
+    def test_the_bare_csv_flag_conflicts_with_it_too(self):
+        """A bare --csv resolves to ./scans/scan_<date>.csv, which is as much a
+        named file as an explicit path is -- so it is the same conflict, and
+        accepting it would have to silently drop one destination."""
+        code, err = self._err(["--csv-dir", "/tmp/nse", "--csv"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("mutually exclusive", err)
+
+    def test_the_order_the_two_flags_are_typed_in_does_not_matter(self):
+        for argv in (["--csv", "/tmp/o.csv", "--csv-dir", "/tmp/nse"],
+                     ["--csv-dir", "/tmp/nse", "--csv", "/tmp/o.csv"]):
+            with self.subTest(argv=argv):
+                code, err = self._err(argv)
+                self.assertNotEqual(code, 0)
+                self.assertIn("mutually exclusive", err)
+
+    def test_the_conflict_survives_the_other_flags_being_present(self):
+        for extra in (["--strict"], ["--json"], ["--csv-per-setup"],
+                      ["--setup", "coiled"]):
+            with self.subTest(extra=extra):
+                code, err = self._err(["--csv-dir", "/tmp/nse",
+                                       "--csv", "/tmp/o.csv"] + extra)
+                self.assertNotEqual(code, 0)
+                self.assertIn("mutually exclusive", err)
+
+    def test_csv_dir_on_its_own_is_legal(self):
+        """The other arm. --csv-dir is sufficient and does not additionally
+        require --csv."""
+        a = screener.parse_args(["--csv-dir", "/tmp/nse"])
+        self.assertEqual(a.csv_dir, "/tmp/nse")
+        self.assertIsNone(a.csv)
+
+    def test_csv_on_its_own_is_still_legal(self):
+        """The other other arm: the guard must not have made --csv an error."""
+        a = screener.parse_args(["--csv", "/tmp/o.csv"])
+        self.assertEqual(a.csv, "/tmp/o.csv")
+        self.assertIsNone(a.csv_dir)
+
+    def test_neither_flag_is_legal(self):
+        a = screener.parse_args([])
+        self.assertIsNone(a.csv)
+        self.assertIsNone(a.csv_dir)
+
+
+class TestCsvDirVersusAppend(unittest.TestCase):
+    """A folder created a moment ago has nothing in it to append to."""
+
+    def _err(self, argv):
+        buf = io.StringIO()
+        with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            screener.parse_args(argv)
+        return cm.exception.code, buf.getvalue()
+
+    def test_append_with_csv_dir_is_a_usage_error(self):
+        """The mutant this kills accepts the flag and ignores it: every run
+        appends to a file created empty seconds earlier, so the output is
+        identical to not passing --append at all, while the user believes a
+        history is accumulating."""
+        code, err = self._err(["--csv-dir", "/tmp/nse", "--append"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("--append", err)
+        self.assertIn("--csv-dir", err)
+
+    def test_the_error_says_why_and_names_the_alternative(self):
+        _, err = self._err(["--csv-dir", "/tmp/nse", "--append"])
+        self.assertIn("new timestamped folder", err)
+        self.assertIn("--csv PATH --append", err)
+
+    def test_the_order_the_two_flags_are_typed_in_does_not_matter(self):
+        for argv in (["--append", "--csv-dir", "/tmp/nse"],
+                     ["--csv-dir", "/tmp/nse", "--append"]):
+            with self.subTest(argv=argv):
+                code, _ = self._err(argv)
+                self.assertNotEqual(code, 0)
+
+    def test_the_conflict_survives_the_other_flags_being_present(self):
+        for extra in (["--strict"], ["--json"], ["--csv-per-setup"],
+                      ["--setup", "coiled"]):
+            with self.subTest(extra=extra):
+                code, err = self._err(["--csv-dir", "/tmp/nse",
+                                       "--append"] + extra)
+                self.assertNotEqual(code, 0)
+                self.assertIn("--append", err)
+
+    def test_csv_dir_without_append_is_legal(self):
+        a = screener.parse_args(["--csv-dir", "/tmp/nse"])
+        self.assertEqual(a.csv_dir, "/tmp/nse")
+        self.assertFalse(a.append)
+
+    def test_append_with_a_csv_path_is_still_legal(self):
+        """The other arm: --append is not broken generally, only paired with
+        --csv-dir."""
+        a = screener.parse_args(["--csv", "/tmp/o.csv", "--append"])
+        self.assertTrue(a.append)
+        self.assertIsNone(a.csv_dir)
+
+    def test_append_with_a_bare_csv_flag_is_still_legal(self):
+        a = screener.parse_args(["--csv", "--append"])
+        self.assertTrue(a.append)
+        self.assertIs(a.csv, csv_export.DEFAULT_PATH)
+
+
+class TestCsvPerSetupWithCsvDir(unittest.TestCase):
+    def _err(self, argv):
+        buf = io.StringIO()
+        with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            screener.parse_args(argv)
+        return cm.exception.code, buf.getvalue()
+
+    def test_csv_dir_alone_satisfies_the_per_setup_dependency(self):
+        a = screener.parse_args(["--csv-dir", "/tmp/nse", "--csv-per-setup"])
+        self.assertTrue(a.csv_per_setup)
+        self.assertEqual(a.csv_dir, "/tmp/nse")
+        self.assertIsNone(a.csv)
+
+    def test_neither_destination_flag_is_still_a_usage_error(self):
+        code, err = self._err(["--csv-per-setup"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("requires --csv", err)
+
+    def test_the_error_now_names_csv_dir_as_the_other_way_to_satisfy_it(self):
+        _, err = self._err(["--csv-per-setup"])
+        self.assertIn("--csv-dir", err)
+
+
+# ------------------------------------------------- --csv-dir through main()
+
+@contextlib.contextmanager
+def pinned_clock(when):
+    """Freeze csv_export.now() so the folder name is an exact string.
+
+    The seam exists for this. Without it the only assertion available is "the
+    name changed between two runs", which passes for a format missing its
+    seconds, its day, or its month."""
+    saved = csv_export.now
+    csv_export.now = lambda: when
+    try:
+        yield
+    finally:
+        csv_export.now = saved
+
+
+class TestMainCsvDir(unittest.TestCase):
+    """--csv-dir end to end through main(), on a pinned clock."""
+
+    def _rows(self, n=4):
+        return [scan_row("SYM%d" % i, total=9.0 - i) for i in range(n)]
+
+    def _two_setups(self, n=3):
+        """n names matching LEADER, the first two also COILED."""
+        out = []
+        for i in range(n):
+            matched = {"LEADER": dict({"fit": 8.0,
+                                       "evidence": dict(LEADER_EV)},
+                                      **volume())}
+            if i < 2:
+                matched["COILED"] = dict({"fit": 7.0,
+                                          "evidence": dict(COILED_EV)},
+                                         **volume())
+            out.append(scan_row("SYM%d" % i, total=9.0 - i, matched=matched))
+        return out
+
+    def test_the_scan_lands_in_a_timestamped_subfolder_of_the_directory(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "nsereports")
+            with pinned_clock(STAMP):
+                rc, _, err = run_main(["--setup", "leader", "--csv-dir", base],
+                                      self._rows(2))
+            self.assertEqual(rc, 0)
+            self.assertEqual(os.listdir(base), [STAMP_NAME], err)
+            self.assertEqual(os.listdir(os.path.join(base, STAMP_NAME)),
+                             ["scan.csv"])
+            self.assertEqual(len(read_back(os.path.join(base, STAMP_NAME,
+                                                        "scan.csv"))), 2)
+
+    def test_nothing_is_written_into_the_directory_itself(self):
+        """The mutant this kills writes scan.csv straight into DIR: the file
+        exists, parses and holds the right rows, and the timestamped folder the
+        flag promised simply never appears."""
+        with tmpdir() as d:
+            base = os.path.join(d, "nsereports")
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", base,
+                          "--csv-per-setup"], self._two_setups())
+            self.assertEqual(os.listdir(base), [STAMP_NAME])
+            self.assertFalse(os.path.exists(os.path.join(base, "scan.csv")))
+            self.assertFalse(os.path.exists(os.path.join(base,
+                                                         "scan_LEADER.csv")))
+
+    def test_the_folder_name_is_the_documented_dd_mm_yy_and_seconds_shape(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", d], self._rows(1))
+            self.assertEqual(os.listdir(d), ["scan_02-08-26_205134"])
+
+    def test_a_different_instant_gives_a_different_folder(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP_2):
+                run_main(["--setup", "leader", "--csv-dir", d], self._rows(1))
+            self.assertEqual(os.listdir(d), [STAMP_2_NAME])
+
+    def test_two_scans_in_the_same_minute_do_not_overwrite_each_other(self):
+        """The seconds component, proved end to end: two runs 25 seconds apart
+        must leave two folders and two combined files, each with its own rows.
+        A folder name without %S merges them and the first scan is gone."""
+        with tmpdir() as d:
+            with pinned_clock(dt.datetime(2026, 8, 2, 20, 51, 34)):
+                run_main(["--setup", "leader", "--csv-dir", d],
+                         [scan_row("FIRST")])
+            with pinned_clock(dt.datetime(2026, 8, 2, 20, 51, 59)):
+                run_main(["--setup", "leader", "--csv-dir", d],
+                         [scan_row("LATER")])
+            self.assertEqual(sorted(os.listdir(d)),
+                             ["scan_02-08-26_205134", "scan_02-08-26_205159"])
+            self.assertEqual(
+                [r["symbol"] for r in
+                 read_back(os.path.join(d, "scan_02-08-26_205134", "scan.csv"))],
+                ["FIRST"])
+            self.assertEqual(
+                [r["symbol"] for r in
+                 read_back(os.path.join(d, "scan_02-08-26_205159", "scan.csv"))],
+                ["LATER"])
+
+    def test_the_per_setup_files_land_inside_the_folder_beside_the_combined(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                rc, _, err = run_main(["--setup", "leader,coiled",
+                                       "--csv-dir", d, "--csv-per-setup"],
+                                      self._two_setups())
+            self.assertEqual(rc, 0)
+            folder = os.path.join(d, STAMP_NAME)
+            self.assertEqual(sorted(os.listdir(folder)),
+                             ["scan.csv", "scan_COILED.csv",
+                              "scan_LEADER.csv"], err)
+
+    def test_each_per_setup_file_holds_only_its_own_rows(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader,coiled", "--csv-dir", d,
+                          "--csv-per-setup"], self._two_setups())
+            folder = os.path.join(d, STAMP_NAME)
+            leader = read_back(os.path.join(folder, "scan_LEADER.csv"))
+            coiled = read_back(os.path.join(folder, "scan_COILED.csv"))
+            self.assertEqual({r["setup_name"] for r in leader}, {"LEADER"})
+            self.assertEqual({r["setup_name"] for r in coiled}, {"COILED"})
+            self.assertEqual(len(leader), 3)
+            self.assertEqual(len(coiled), 2)
+            self.assertEqual(len(read_back(os.path.join(folder, "scan.csv"))), 5)
+
+    def test_a_setup_that_matched_nothing_writes_no_file_in_the_folder(self):
+        """The existing per-setup rule, unchanged by the new destination."""
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "all", "--csv-dir", d, "--csv-per-setup"],
+                         self._two_setups())
+            written = set(os.listdir(os.path.join(d, STAMP_NAME)))
+            self.assertIn("scan_LEADER.csv", written)
+            self.assertIn("scan_COILED.csv", written)
+            for name in ("BREAKOUT", "PULLBACK", "TURN"):
+                self.assertNotIn("scan_%s.csv" % name, written, name)
+
+    def test_a_scan_that_matched_nothing_still_writes_the_headed_combined_file(self):
+        """The opposite rule, also unchanged: the folder is created and holds
+        exactly one headed, parseable file saying nothing matched."""
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                rc, _, _ = run_main(["--setup", "all", "--csv-dir", d,
+                                     "--csv-per-setup"],
+                                    [scan_row("A", matched={})])
+            self.assertEqual(rc, 0)
+            folder = os.path.join(d, STAMP_NAME)
+            self.assertEqual(os.listdir(folder), ["scan.csv"])
+            self.assertEqual(raw_lines(os.path.join(folder, "scan.csv")),
+                             [",".join(EXPECTED_COLUMNS)])
+
+    def test_without_the_per_setup_flag_only_the_combined_file_is_written(self):
+        """The other arm: --csv-dir alone does not split."""
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader,coiled", "--csv-dir", d],
+                         self._two_setups())
+            self.assertEqual(os.listdir(os.path.join(d, STAMP_NAME)),
+                             ["scan.csv"])
+
+    def test_the_created_folder_is_printed_before_the_wrote_lines(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                _, _, err = run_main(["--setup", "leader,coiled",
+                                      "--csv-dir", d, "--csv-per-setup"],
+                                     self._two_setups())
+            folder = os.path.join(d, STAMP_NAME)
+            self.assertIn("created %s" % folder, err)
+            self.assertIn("wrote 5 rows to %s" % os.path.join(folder,
+                                                              "scan.csv"), err)
+            self.assertIn("wrote 2 rows to %s"
+                          % os.path.join(folder, "scan_COILED.csv"), err)
+            self.assertIn("wrote 3 rows to %s"
+                          % os.path.join(folder, "scan_LEADER.csv"), err)
+            self.assertLess(err.index("created "), err.index("wrote "))
+
+    def test_the_notices_go_to_stderr_so_json_on_stdout_stays_parseable(self):
+        import json
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                rc, out, err = run_main(["--setup", "leader", "--json",
+                                         "--csv-dir", d], self._rows(2))
+            self.assertEqual(rc, 0)
+            json.loads(out)
+            self.assertNotIn("created ", out)
+            self.assertIn("created ", err)
+
+    def test_missing_parents_of_the_directory_are_created(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "a", "b", "c")
+            with pinned_clock(STAMP):
+                rc, _, _ = run_main(["--setup", "leader", "--csv-dir", base],
+                                    self._rows(1))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.isfile(os.path.join(base, STAMP_NAME,
+                                                        "scan.csv")))
+
+    def test_a_second_scan_into_the_same_directory_keeps_the_first(self):
+        """Each run gets its own folder; nothing accumulates inside one and
+        nothing is replaced."""
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", d],
+                         [scan_row("FIRST")])
+            with pinned_clock(STAMP_2):
+                run_main(["--setup", "leader", "--csv-dir", d],
+                         [scan_row("LATER")])
+            self.assertEqual(sorted(os.listdir(d)),
+                             sorted([STAMP_NAME, STAMP_2_NAME]))
+            self.assertEqual(
+                [r["symbol"] for r in
+                 read_back(os.path.join(d, STAMP_NAME, "scan.csv"))], ["FIRST"])
+
+    def test_it_does_not_also_write_the_default_scans_directory(self):
+        with tmpdir() as d, chdir(d):
+            base = os.path.join(d, "nsereports")
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", base],
+                         self._rows(1))
+            self.assertFalse(os.path.exists(os.path.join(d, "scans")))
+
+    def test_a_directory_argument_that_is_a_file_fails_before_the_scan(self):
+        """`--csv-dir scan.csv` is the plausible typo. It must be reported off
+        argv, not after 23 seconds of network work that then gets thrown away --
+        so the scan must never be reached, and the file must be untouched."""
+        calls = []
+        with tmpdir() as d:
+            blocker = os.path.join(d, "notadir.csv")
+            open(blocker, "w").close()
+            saved = screener.scan
+            screener.scan = lambda *a, **k: (calls.append(1), ([], []))[1]
+            buf = io.StringIO()
+            try:
+                with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+                    screener.main(["--setup", "leader", "--csv-dir", blocker])
+            finally:
+                screener.scan = saved
+            self.assertEqual(calls, [], "the scan ran before the flag was checked")
+            self.assertNotEqual(cm.exception.code, 0)
+            self.assertIn(blocker, buf.getvalue())
+            self.assertIn("not a directory", buf.getvalue())
+            self.assertEqual(os.listdir(d), ["notadir.csv"])
+            self.assertEqual(os.path.getsize(blocker), 0)
+
+    def test_the_twenty_row_cap_still_applies_inside_the_folder(self):
+        rows = [scan_row("SYM%02d" % i, total=9.0 - i * 0.1) for i in range(31)]
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", d,
+                          "--csv-per-setup"], rows)
+            folder = os.path.join(d, STAMP_NAME)
+            for name in ("scan.csv", "scan_LEADER.csv"):
+                back = read_back(os.path.join(folder, name))
+                self.assertEqual(len(back), csv_export.MAX_ROWS_PER_SETUP, name)
+                self.assertEqual([int(r["rank_within_setup"]) for r in back],
+                                 list(range(1, 21)), name)
+
+    def test_the_columns_and_the_date_cells_are_unchanged_by_the_destination(self):
+        with tmpdir() as d:
+            with pinned_clock(STAMP):
+                run_main(["--setup", "leader", "--csv-dir", d], self._rows(1))
+            path = os.path.join(d, STAMP_NAME, "scan.csv")
+            self.assertEqual(raw_lines(path)[0], ",".join(EXPECTED_COLUMNS))
+            self.assertEqual(read_back(path)[0]["last_closed_bar_date"],
+                             "31-Jul-2026")
+
+    def test_the_two_usage_errors_exit_before_any_scan_or_folder(self):
+        """Neither pairing may scan the universe and then discard the work, and
+        neither may leave a half-made directory behind."""
+        for argv in (["--csv-dir", "OUT", "--csv", "o.csv"],
+                     ["--csv-dir", "OUT", "--append"]):
+            with self.subTest(argv=argv):
+                with tmpdir() as d, chdir(d):
+                    buf = io.StringIO()
+                    with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+                        screener.main([a.replace("OUT", os.path.join(d, "out"))
+                                       for a in argv])
+                    self.assertNotEqual(cm.exception.code, 0)
+                    self.assertEqual(os.listdir(d), [])
 
 
 class TestLiveSmoke(unittest.TestCase):

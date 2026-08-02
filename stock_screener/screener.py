@@ -471,21 +471,65 @@ def parse_args(argv):
                    default=None, metavar="PATH",
                    help="write every match to a CSV; bare flag uses "
                         "./%s/scan_<date>.csv" % csv_export.DEFAULT_DIR)
+    p.add_argument("--csv-dir", default=None, dest="csv_dir", metavar="DIR",
+                   help="write this scan's reports into a NEW timestamped "
+                        "subfolder of DIR (DIR/scan_<dd-mm-yy>_<HHMMSS>/"
+                        "scan.csv); mutually exclusive with --csv")
     p.add_argument("--csv-per-setup", action="store_true", dest="csv_per_setup",
                    help="also write one file per matched setup, named from the "
-                        "--csv path (scan_<date>_COILED.csv); requires --csv")
+                        "combined file's path (scan_<date>_COILED.csv, or "
+                        "scan_COILED.csv under --csv-dir); requires --csv or "
+                        "--csv-dir")
     p.add_argument("--append", action="store_true",
                    help="append to the CSV instead of overwriting it")
     p.add_argument("--refresh-universe", action="store_true", dest="refresh")
     a = p.parse_args(argv)
+    # Two destinations for one scan, and nothing to choose between them. Silently
+    # preferring one is the failure: the user gets a zero exit code, a scan that
+    # ran, and files in whichever place the code happened to check first, which
+    # is precisely the place they will not look. Both forms of --csv are covered,
+    # the bare flag included -- a bare --csv resolves to ./scans/scan_<date>.csv,
+    # which is as much a named file as an explicit path is.
+    if a.csv is not None and a.csv_dir is not None:
+        p.error("--csv and --csv-dir are mutually exclusive: --csv names the "
+                "FILE to write, --csv-dir names a DIRECTORY to create this "
+                "scan's own timestamped folder inside. Pass one or the other")
+    # --append asks to add to something already there; --csv-dir guarantees a
+    # folder that was created a moment ago and is empty. Accepting the pair
+    # would append every run to a fresh empty file and imply a history is
+    # accumulating, when in fact each run starts a new folder and the "history"
+    # is one scan per folder. Use --csv PATH --append for a growing log.
+    if a.csv_dir is not None and a.append:
+        p.error("--append cannot be used with --csv-dir: --csv-dir creates a "
+                "new timestamped folder for every run, so there is never an "
+                "earlier file inside it to append to. Use --csv PATH --append "
+                "to keep one growing file")
+    # Checked here as well as inside make_scan_dir, and deliberately so: this
+    # one runs BEFORE the scan. `--csv-dir scan.csv` is the plausible typo, and
+    # the scan is ~23 seconds of network work -- finding the typo afterwards
+    # throws all of it away to report something argv already showed. The check
+    # is read-only, so doing it early costs nothing and creates nothing.
+    #
+    # make_scan_dir keeps its own guard rather than trusting this one: it is a
+    # module-level entry point callable without this CLI, and a directory can be
+    # replaced by a file in the seconds between the two checks. A path that does
+    # not exist yet is fine at both -- the flag exists to create it.
+    if (a.csv_dir is not None and os.path.exists(a.csv_dir)
+            and not os.path.isdir(a.csv_dir)):
+        p.error("--csv-dir %s exists as a file, not a directory: --csv-dir "
+                "names a directory to create this scan's folder in, and --csv "
+                "names a file to write" % a.csv_dir)
     # A usage error, not a silent no-op. --csv-per-setup names its files FROM
-    # the --csv path, so alone it has no base to build on and nothing to split;
-    # accepting it quietly would leave a user who mistyped the pair staring at a
-    # directory that never got the files they asked for, with a zero exit code
-    # telling them it worked. p.error prints the usage line and exits 2.
-    if a.csv_per_setup and a.csv is None:
-        p.error("--csv-per-setup requires --csv: the per-setup files are named "
-                "from the --csv path, so there is no base path without it")
+    # the combined file's path, so alone it has no base to build on and nothing
+    # to split; accepting it quietly would leave a user who mistyped the pair
+    # staring at a directory that never got the files they asked for, with a
+    # zero exit code telling them it worked. p.error prints the usage line and
+    # exits 2. Either destination flag supplies the base, so --csv-dir on its
+    # own satisfies it and does not additionally require --csv.
+    if a.csv_per_setup and a.csv is None and a.csv_dir is None:
+        p.error("--csv-per-setup requires --csv or --csv-dir: the per-setup "
+                "files are named from the combined file's path, so there is no "
+                "base path without one of them")
     return a
 
 
@@ -530,8 +574,19 @@ def main(argv=None):
     # Before the --json return: the two output paths are independent and both
     # may be asked for in one run. by_setup goes in whole -- `top` truncates the
     # terminal, never the file.
-    if a.csv is not None:
-        path = csv_export.resolve_path(a.csv, scan_date)
+    if a.csv is not None or a.csv_dir is not None:
+        if a.csv_dir is not None:
+            # The folder is created and announced BEFORE the files, so the
+            # listing reads top-down: where this scan went, then what went in
+            # it. The clock is read here, through csv_export.now(), rather than
+            # inside make_scan_dir -- one wall-clock read per run, and a test
+            # can pin it.
+            scan_dir = csv_export.make_scan_dir(a.csv_dir, csv_export.now())
+            path = csv_export.combined_path(scan_dir)
+            # stderr with the "wrote N rows" lines below, for the same reason.
+            print("created %s" % scan_dir, file=sys.stderr)
+        else:
+            path = csv_export.resolve_path(a.csv, scan_date)
         csv_rows = csv_export.build_rows(rows, by_setup, chosen, scan_date,
                                          closed,
                                          csv_export.universe_label(a.universe),
