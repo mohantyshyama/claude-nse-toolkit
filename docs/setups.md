@@ -214,8 +214,11 @@ order the list as well as filter it — a name closing strong sits above one clo
 when both cleared the gate.
 
 **In the output.** Three terminal columns — `Up/Down Volume Ratio`, `Volume Signal` and
-`Accumulation Trend` — and five CSV columns: `ud_ratio`, `ud_weighted`, `ud_20`,
-`volume_signal` and `accumulation_trend`.
+`Accumulation Trend` — and five CSV columns: `up_down_volume_ratio_50d`,
+`close_weighted_volume_ratio_50d`, `up_down_volume_ratio_20d`, `volume_signal_reading` and
+`accumulation_trend_reading`. The CSV names are longer than the terminal labels on purpose:
+a header has to state the measurement and its unit without the reader consulting this
+document.
 
 ---
 
@@ -629,7 +632,8 @@ a good chart you cannot buy today is information.
 ### The Up/Down Volume Ratio column
 
 Every table carries `Up/Down Volume Ratio`, CONFLUENCE included, and the CSV carries it as
-`ud_ratio` immediately after `rs_3m`. It is a
+`up_down_volume_ratio_50d` immediately after
+`relative_strength_3month_vs_nifty50_pct_points`. It is a
 **base column, not evidence**: like Risk:Reward and relative strength it is one number
 meaning one thing for every name, rather than one of the two setup-specific facts each
 table reports.
@@ -676,8 +680,9 @@ ratio makes obvious, wearing a good number instead. The name still matched its s
 earned a closer look, not a position.
 
 In the CSV the same information arrives as five columns rather than three, because the file
-keeps the numbers the labels were derived from: `ud_ratio`, `ud_weighted`, `ud_20`,
-`volume_signal`, `accumulation_trend`. That takes it **from 27 columns to 31**.
+keeps the numbers the labels were derived from: `up_down_volume_ratio_50d`,
+`close_weighted_volume_ratio_50d`, `up_down_volume_ratio_20d`, `volume_signal_reading`,
+`accumulation_trend_reading`. That takes it **from 27 columns to 31**.
 
 ### Scores are catalyst-neutral
 

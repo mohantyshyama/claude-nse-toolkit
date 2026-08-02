@@ -75,7 +75,7 @@ is precisely what `watchlist_analyser` is for.
 1.5:1 against a 1.5×ATR stop is capped and demoted, however good its chart. Trend and entry
 price are separate questions, and the whole toolkit is built to keep them separate.
 
-> **A note on test coverage.** Only `stock_screener` has a test suite (1234 tests). The other
+> **A note on test coverage.** Only `stock_screener` has a test suite (1294 tests). The other
 > three predate it and have none. That matters most for `analyze.py`: three skills import
 > it, so a regression there would propagate silently with nothing to catch it.
 
@@ -220,6 +220,7 @@ python3 ~/.claude/skills/stock_screener/screener.py --setup confluence --top 10
 python3 ~/.claude/skills/stock_screener/screener.py --setup breakout --strict
 python3 ~/.claude/skills/stock_screener/screener.py --setup leader --sector "Financial Services"
 python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv        # ./scans/scan_<date>.csv
+python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv --csv-per-setup  # + one file per setup
 
 python3 ~/.claude/skills/watchlist_analyser/watchlist.py "TITAN,BEL,CHOLAFIN" --detail
 python3 ~/.claude/skills/stock_analyser/analyze.py FEDERALBNK
@@ -311,7 +312,7 @@ aside. The risk-reward veto overrides the band.
 ### Every table shows the up/down volume ratio
 
 `Up/Down Volume Ratio` is a base column on every screener table, CONFLUENCE included, and
-`ud_ratio` in the CSV: volume on up-closes divided by volume on down-closes over the last
+`up_down_volume_ratio_50d` in the CSV: volume on up-closes divided by volume on down-closes over the last
 50 sessions. It is shown whether or not it gated the setup — LEADER and TURN reject on it,
 so those columns can never read below their floor, while COILED, BREAKOUT and PULLBACK do
 not, which makes it the most informative number in those rows.
@@ -354,32 +355,112 @@ reporting a bare zero. The screener will not pad a list to fill 15 rows.
 ### The CSV is long format, capped at 20 rows per setup
 
 `--csv` writes one row per (symbol, setup) pair: a stock matching three setups gets three
-rows, so a seventh setup added later costs zero new columns. `setups_matched` and
-`match_count` appear on every row, so a COILED row shows the stock is also a LEADER without
-a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"` — because
-a file that needs string-stripping before a column can be sorted is not a data file.
-
-31 columns, up from 27. `ud_ratio` sits immediately after `rs_3m`, alongside the other
-per-symbol metrics rather than in an evidence slot, and is written on every row including
-CONFLUENCE. An unmeasurable ratio is an empty cell, never a `1.00`. The four columns added
-with it are the two new numbers and the two labels derived from them — `ud_weighted`, `ud_20`,
-`volume_signal` and `accumulation_trend` — so the file keeps the inputs, not just the verdict,
-and a spreadsheet can re-cut the four-way reading itself.
+rows, so a seventh setup added later costs zero new columns. `all_setups_matched` and
+`setups_matched_count` appear on every row, so a COILED row shows the stock is also a
+LEADER without a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not
+`"4.11x"` — because a file that needs string-stripping before a column can be sorted is not
+a data file.
 
 The file keeps the top 20 of each setup's ranking, so a full scan writes at most 120 rows.
 The fortieth name in a 45-name LEADER table cleared the gate and nothing more; keeping it
 made the file look like a data set when it is a shortlist. `--top` is a separate limit and
-governs the terminal alone — it never reaches the file. The `rank` column preserves the
-on-screen order and stays contiguous `1..20`, so `rank <= 15` reproduces the printed table
-exactly.
+governs the terminal alone — it never reaches the file. The `rank_within_setup` column
+preserves the on-screen order and stays contiguous `1..20`, so `rank_within_setup <= 15`
+reproduces the printed table exactly.
 
 Dates in the file read `02-Aug-2026`, not `2026-08-02`, because Excel converts an ISO date
 to its internal serial and renders the cell as a bare number. The default *filename* stays
 ISO — `scans/scan_2026-08-02.csv` — so a directory of scans lists chronologically. The two
 formats serve a spreadsheet cell and a directory listing, and neither is right for both.
 
-`--append` writes the header only when the file is new or empty, and the `mode` column
-records `strict` or `loosened` so two differently-thresholded scans cannot be read as one.
+`--append` writes the header only when the file is new or empty, and the `threshold_mode`
+column records `strict` or `loosened` so two differently-thresholded scans cannot be read
+as one.
+
+### CSV headers say what the number is and in what unit
+
+The file is opened in a spreadsheet weeks after the scan, by someone without the
+documentation beside them. So every one of the 31 headers carries its own meaning and
+scale: `up_down_volume_ratio_20d`, not `ud_20`;
+`relative_strength_3month_vs_nifty50_pct_points`, not `rs_3m`;
+`stop_price_1p5_atr_below_last`, not `stop`. A header that needs a glossary entry to be
+understood is the bug, and the extra characters that avoid it are not a cost.
+
+That is a standing constraint on the schema, recorded at the top of `csv_export.py` and in
+`SKILL.md`, and it binds every column added later. Names stay valid snake_case identifiers
+so `pandas` attribute access and spreadsheet formulas both work — a decimal point becomes
+`p`, as in `1p5_atr` — and no two names repeat or nest inside one another. The *internal*
+field names that `screener.py` ranks and renders from stay terse on purpose: those are
+in-memory keys reaching into `analyze.py`'s shape, and only the file is read cold.
+
+The 31 columns, in order:
+
+| # | Column | What it holds |
+|---|---|---|
+| 1 | `scan_date` | The day the scan ran, `02-Aug-2026` |
+| 2 | `last_closed_bar_date` | The last completed session the scan read |
+| 3 | `universe_name` | `nifty500` |
+| 4 | `threshold_mode` | `strict` or `loosened` |
+| 5 | `symbol` | NSE ticker |
+| 6 | `sector` | NSE sector |
+| 7 | `setup_name` | `COILED` / `BREAKOUT` / `LEADER` / `PULLBACK` / `TURN` / `CONFLUENCE` |
+| 8 | `rank_within_setup` | 1..20, this setup's own ranking |
+| 9 | `setup_fit_score_0_to_10` | How well the name fits *this* setup |
+| 10 | `score_now_catalyst_neutral_0_to_10` | Weighted 6-factor total, catalyst held at 5.0 |
+| 11 | `score_if_trigger_fires_0_to_10` | The same total projected at the breakout trigger |
+| 12 | `risk_reward_ratio_vs_1p5_atr_stop` | Reward ÷ risk, risk measured to the 1.5×ATR stop |
+| 13 | `risk_reward_veto_applied` | `1` when R:R fell under 1.5 and the name was demoted |
+| 14 | `action_bucket` | `BUY NOW` / `BUY HALF` / `ALERT` / `WATCH` |
+| 15 | `last_price` | Close of the last completed session |
+| 16 | `trigger_price_that_repairs_setup` | The breakout level the projection assumes |
+| 17 | `stop_price_1p5_atr_below_last` | `last_price − 1.5 × daily ATR` |
+| 18 | `relative_strength_1month_vs_nifty50_pct_points` | 1-month return minus Nifty 50's, in points of percent |
+| 19 | `relative_strength_3month_vs_nifty50_pct_points` | The same over 3 months |
+| 20 | `up_down_volume_ratio_50d` | Up-close volume ÷ down-close volume, 50 sessions |
+| 21 | `close_weighted_volume_ratio_50d` | The same 50 sessions, each bar weighted by where it closed in its own range |
+| 22 | `up_down_volume_ratio_20d` | The plain ratio over the last 20 sessions |
+| 23 | `volume_signal_reading` | `accumulation` / `distribution-into-strength` / `supported` / `distribution` / `unknown` |
+| 24 | `accumulation_trend_reading` | `strengthening` / `steady` / `flattening` / `fading` / `reversed` / `unknown` |
+| 25 | `all_setups_matched` | Pipe-delimited, life-cycle ordered, on every row |
+| 26 | `setups_matched_count` | How many, CONFLUENCE excluded |
+| 27 | `evidence_1_metric_name` | The setup-specific metric, e.g. `contraction` |
+| 28 | `evidence_1_metric_value` | Its raw number |
+| 29 | `evidence_2_metric_name` | The second setup-specific metric |
+| 30 | `evidence_2_metric_value` | Its raw number |
+| 31 | `warning_flags` | Pipe-delimited caveats; `volume_light` today |
+
+`up_down_volume_ratio_50d` sits immediately after the 3-month relative strength, alongside
+the other per-symbol metrics rather than in an evidence slot, and is written on every row
+including CONFLUENCE. An unmeasurable ratio is an empty cell, never a `1.00`. Beside it are
+the two other raw numbers and the two labels derived from them —
+`close_weighted_volume_ratio_50d`, `up_down_volume_ratio_20d`, `volume_signal_reading` and
+`accumulation_trend_reading` — so the file keeps the inputs, not just the verdict, and a
+spreadsheet can re-cut the four-way reading itself.
+
+### `--csv-per-setup` splits the scan into one file per setup
+
+Passed alongside `--csv`, it *also* writes one file per setup that matched, named from the
+`--csv` path:
+
+```
+scans/scan_2026-08-02.csv          the combined scan, still written
+scans/scan_2026-08-02_COILED.csv   11 rows
+scans/scan_2026-08-02_LEADER.csv    7 rows
+```
+
+Each carries the same 31 columns and the same 20-row cap, holding only that setup's rows.
+The combined file is still written — the split is additional, never a replacement.
+
+**A setup that matched nothing writes no file**, not a header-only one. An empty
+`scan_2026-08-02_TURN.csv` reads as "the scan produced nothing" to whoever opens it, when
+what it means is that TURN matched nothing while COILED matched eleven. Absence is the
+honest form of that. The combined file keeps the opposite rule for the opposite reason: a
+scan that matched nothing anywhere *is* a finding and needs a headed, parseable file to say
+so.
+
+`--csv-per-setup` without `--csv` is a usage error rather than a silent no-op, because the
+per-setup files are named from the `--csv` path and alone the flag has no base to build on.
+One stderr line per file names it and its row count, so `--json` on stdout stays parseable.
 
 ## Architecture
 
@@ -390,9 +471,9 @@ stock_screener/
   universe.py     universe parsing, sector filter, NSE constituent refresh
   setups.py       six setup predicates, fit scoring, confluence
   screener.py     parallel scan, ranking, rendering, CLI
-  csv_export.py   long-format CSV export: row building and file I/O
+  csv_export.py   long-format CSV export: self-describing headers, per-setup split
   nifty500.txt    500 symbols with sectors, refreshable from NSE
-  tests/          1234 tests
+  tests/          1294 tests
 
 stock_analyser/   analyze.py (the scoring engine), levels.py (nine-method S/R)
 watchlist_analyser/  watchlist.py (comparative scoring, relative strength)
@@ -426,7 +507,7 @@ India coverage. They silently rewrite the exchange, return no data, and then rep
 cd stock_screener && python3 -m unittest discover -s tests
 ```
 
-1234 tests, no third-party test runner. Beyond the usual coverage, the suite is
+1294 tests, no third-party test runner. Beyond the usual coverage, the suite is
 **mutation-verified**: for each assertion, a deliberately wrong implementation was patched
 in and the test confirmed to fail. That practice exists because it caught things ordinary
 testing did not — including a predicate that could never match while all of its tests
