@@ -20,19 +20,83 @@ import screener
 import setups
 
 
+# Spelt out in full and asserted as a whole list, never as a set of "is this
+# name in there" checks: two columns accidentally given the SAME verbose name,
+# or one given a name that merely contains another's, is exactly the failure
+# self-describing headers are supposed to prevent, and only an exact ordered
+# comparison catches it.
 EXPECTED_COLUMNS = [
-    "scan_date", "last_closed_bar", "universe", "mode",
+    "scan_date", "last_closed_bar_date", "universe_name", "threshold_mode",
     "symbol", "sector",
-    "setup", "rank", "setup_fit",
-    "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
-    "price", "trigger_price", "stop",
-    "rs_1m", "rs_3m", "ud_ratio", "ud_weighted", "ud_20",
-    "volume_signal", "accumulation_trend",
-    "setups_matched", "match_count",
-    "evidence_1_label", "evidence_1_value",
-    "evidence_2_label", "evidence_2_value",
-    "flags",
+    "setup_name", "rank_within_setup", "setup_fit_score_0_to_10",
+    "score_now_catalyst_neutral_0_to_10", "score_if_trigger_fires_0_to_10",
+    "risk_reward_ratio_vs_1p5_atr_stop", "risk_reward_veto_applied",
+    "action_bucket",
+    "last_price", "trigger_price_that_repairs_setup",
+    "stop_price_1p5_atr_below_last",
+    "relative_strength_1month_vs_nifty50_pct_points",
+    "relative_strength_3month_vs_nifty50_pct_points",
+    "up_down_volume_ratio_50d", "close_weighted_volume_ratio_50d",
+    "up_down_volume_ratio_20d",
+    "volume_signal_reading", "accumulation_trend_reading",
+    "all_setups_matched", "setups_matched_count",
+    "evidence_1_metric_name", "evidence_1_metric_value",
+    "evidence_2_metric_name", "evidence_2_metric_value",
+    "warning_flags",
 ]
+
+# The internal build_result_row key -> the FILE's header, for the columns whose
+# names differ. Deliberately not used to GENERATE the assertions below -- a test
+# that derived its expectation from this map would agree with any rename that
+# went through the map, including a wrong one. It exists so a reader can see the
+# two vocabularies side by side, and so the two-way pinning test can prove the
+# file's names and the in-memory names really are separate sets.
+INTERNAL_TO_COLUMN = {
+    "last_closed_bar": "last_closed_bar_date",
+    "universe": "universe_name",
+    "mode": "threshold_mode",
+    "setup": "setup_name",
+    "rank": "rank_within_setup",
+    "setup_fit": "setup_fit_score_0_to_10",
+    "score_now": "score_now_catalyst_neutral_0_to_10",
+    "score_at_trigger": "score_if_trigger_fires_0_to_10",
+    "risk_reward": "risk_reward_ratio_vs_1p5_atr_stop",
+    "vetoed": "risk_reward_veto_applied",
+    "action": "action_bucket",
+    "price": "last_price",
+    "trigger_price": "trigger_price_that_repairs_setup",
+    "stop": "stop_price_1p5_atr_below_last",
+    "rs_1m": "relative_strength_1month_vs_nifty50_pct_points",
+    "rs_3m": "relative_strength_3month_vs_nifty50_pct_points",
+    "ud_ratio": "up_down_volume_ratio_50d",
+    "ud_weighted": "close_weighted_volume_ratio_50d",
+    "ud_20": "up_down_volume_ratio_20d",
+    "volume_signal": "volume_signal_reading",
+    "accumulation_trend": "accumulation_trend_reading",
+    "setups_matched": "all_setups_matched",
+    "match_count": "setups_matched_count",
+    "evidence_1_label": "evidence_1_metric_name",
+    "evidence_1_value": "evidence_1_metric_value",
+    "evidence_2_label": "evidence_2_metric_name",
+    "evidence_2_value": "evidence_2_metric_value",
+    "flags": "warning_flags",
+}
+
+# Shorthands for the longest names, so the assertions below stay readable
+# without any of them losing the exact string they are checking. Each is used
+# where the OLD terse name used to appear, so the diff is a rename and nothing
+# else.
+C_SCORE_NOW = "score_now_catalyst_neutral_0_to_10"
+C_SCORE_TRIG = "score_if_trigger_fires_0_to_10"
+C_RR = "risk_reward_ratio_vs_1p5_atr_stop"
+C_FIT = "setup_fit_score_0_to_10"
+C_STOP = "stop_price_1p5_atr_below_last"
+C_TRIGGER_PX = "trigger_price_that_repairs_setup"
+C_RS_1M = "relative_strength_1month_vs_nifty50_pct_points"
+C_RS_3M = "relative_strength_3month_vs_nifty50_pct_points"
+C_UD_50 = "up_down_volume_ratio_50d"
+C_UD_W = "close_weighted_volume_ratio_50d"
+C_UD_20 = "up_down_volume_ratio_20d"
 
 LEADER_EV = {"pct_from_high": 3.5, "rs_1m": 6.2, "rs_3m": 11.4,
              "full_stack": True}
@@ -134,13 +198,13 @@ class TestUpDownRatioColumn(unittest.TestCase):
                                                                   "LEADER"]})]},
                      ["COILED", "LEADER", "CONFLUENCE"])
         self.assertEqual(len(rows), 3)
-        self.assertEqual({r["setup"]: r["ud_ratio"] for r in rows},
+        self.assertEqual({r["setup_name"]: r[C_UD_50] for r in rows},
                          {"COILED": 1.11, "LEADER": 2.22, "CONFLUENCE": 3.33})
 
     def test_it_is_the_raw_ratio_not_a_formatted_string(self):
         """House rule for this file: raw sortable numbers, never `"1.47x"`."""
         r = build([scanned()], {"LEADER": [result()]}, ["LEADER"])[0]
-        self.assertIsInstance(r["ud_ratio"], float)
+        self.assertIsInstance(r[C_UD_50], float)
 
     def test_it_is_rounded_to_two_places_like_the_terminal_column(self):
         """Two places, not three: the ratio is built from 50 bars of volume and
@@ -150,11 +214,11 @@ class TestUpDownRatioColumn(unittest.TestCase):
         four-place, a three-place and a whole-number rounding alike."""
         r = build([scanned()], {"LEADER": [result(ud_ratio=1.4728394)]},
                   ["LEADER"])[0]
-        self.assertEqual(r["ud_ratio"], 1.47)
+        self.assertEqual(r[C_UD_50], 1.47)
         with tmpdir() as d:
             path = os.path.join(d, "s.csv")
             csv_export.write_csv(path, [r])
-            self.assertEqual(read_back(path)[0]["ud_ratio"], "1.47")
+            self.assertEqual(read_back(path)[0][C_UD_50], "1.47")
 
     def test_a_row_without_the_key_raises_rather_than_writing_a_blank(self):
         """The sibling arm of the None case. None is a ratio that could not be
@@ -171,21 +235,21 @@ class TestUpDownRatioColumn(unittest.TestCase):
         """None means the stock had no down-closes. Writing 1.0 would state a
         measurement that was never made, and it would sort among real values."""
         rows = build([scanned()], {"LEADER": [result(ud_ratio=None)]}, ["LEADER"])
-        self.assertEqual(rows[0]["ud_ratio"], "")
+        self.assertEqual(rows[0][C_UD_50], "")
         with tmpdir() as d:
             path = os.path.join(d, "s.csv")
             csv_export.write_csv(path, rows)
-            self.assertEqual(read_back(path)[0]["ud_ratio"], "")
+            self.assertEqual(read_back(path)[0][C_UD_50], "")
 
     def test_a_measured_zero_is_written_as_zero_not_left_blank(self):
         """0.0 is a measured finding -- no up-volume at all -- and must be
         distinguishable from a missing one. `if v is None`, never `if not v`."""
         rows = build([scanned()], {"LEADER": [result(ud_ratio=0.0)]}, ["LEADER"])
-        self.assertEqual(rows[0]["ud_ratio"], 0.0)
+        self.assertEqual(rows[0][C_UD_50], 0.0)
         with tmpdir() as d:
             path = os.path.join(d, "s.csv")
             csv_export.write_csv(path, rows)
-            self.assertEqual(read_back(path)[0]["ud_ratio"], "0.0")
+            self.assertEqual(read_back(path)[0][C_UD_50], "0.0")
 
 
 class TestVolumeColumns(unittest.TestCase):
@@ -197,9 +261,19 @@ class TestVolumeColumns(unittest.TestCase):
     them, all as universal per-row columns rather than evidence slots.
     """
 
-    NEW = ("ud_weighted", "ud_20", "volume_signal", "accumulation_trend")
-    RATIOS = ("ud_ratio", "ud_weighted", "ud_20")
-    LABELS = ("volume_signal", "accumulation_trend")
+    # (build_result_row's key, the FILE's column). The pair is carried
+    # explicitly rather than reusing one string for both, because they are no
+    # longer the same word: `result(ud_20=...)` sets an in-memory field and
+    # `row["up_down_volume_ratio_20d"]` reads the file's column, and a test that
+    # used one name for both could not tell a row dict keyed on the internal
+    # names from one keyed on the file's.
+    NEW = (("ud_weighted", C_UD_W), ("ud_20", C_UD_20),
+           ("volume_signal", "volume_signal_reading"),
+           ("accumulation_trend", "accumulation_trend_reading"))
+    RATIOS = (("ud_ratio", C_UD_50), ("ud_weighted", C_UD_W),
+              ("ud_20", C_UD_20))
+    LABELS = (("volume_signal", "volume_signal_reading"),
+              ("accumulation_trend", "accumulation_trend_reading"))
 
     def one(self, **over):
         return build([scanned()], {"LEADER": [result(**over)]}, ["LEADER"])[0]
@@ -218,11 +292,12 @@ class TestVolumeColumns(unittest.TestCase):
         row = self.one(ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
                        volume_signal="distribution-into-strength",
                        accumulation_trend="fading")
-        self.assertEqual(row["ud_ratio"], 1.47)
-        self.assertEqual(row["ud_weighted"], 0.63)
-        self.assertEqual(row["ud_20"], 2.85)
-        self.assertEqual(row["volume_signal"], "distribution-into-strength")
-        self.assertEqual(row["accumulation_trend"], "fading")
+        self.assertEqual(row[C_UD_50], 1.47)
+        self.assertEqual(row[C_UD_W], 0.63)
+        self.assertEqual(row[C_UD_20], 2.85)
+        self.assertEqual(row["volume_signal_reading"],
+                         "distribution-into-strength")
+        self.assertEqual(row["accumulation_trend_reading"], "fading")
 
     def test_the_written_cells_match_the_written_header_positionally(self):
         """Read back by POSITION, not by name: DictReader keyed on the header
@@ -237,16 +312,16 @@ class TestVolumeColumns(unittest.TestCase):
             header, values = [l.split(",") for l in raw_lines(path)]
         cells = dict(zip(header, values))
         self.assertEqual(header, csv_export.COLUMNS)
-        self.assertEqual(cells["ud_ratio"], "1.47")
-        self.assertEqual(cells["ud_weighted"], "0.63")
-        self.assertEqual(cells["ud_20"], "2.85")
-        self.assertEqual(cells["volume_signal"], "supported")
-        self.assertEqual(cells["accumulation_trend"], "reversed")
+        self.assertEqual(cells[C_UD_50], "1.47")
+        self.assertEqual(cells[C_UD_W], "0.63")
+        self.assertEqual(cells[C_UD_20], "2.85")
+        self.assertEqual(cells["volume_signal_reading"], "supported")
+        self.assertEqual(cells["accumulation_trend_reading"], "reversed")
 
     def test_the_two_new_ratios_are_raw_numbers_not_formatted_strings(self):
         row = self.one()
-        self.assertIsInstance(row["ud_weighted"], float)
-        self.assertIsInstance(row["ud_20"], float)
+        self.assertIsInstance(row[C_UD_W], float)
+        self.assertIsInstance(row[C_UD_20], float)
 
     def test_the_two_new_ratios_are_rounded_to_two_places_like_ud_ratio(self):
         """The same convention, for the same reason: they are ratios built from
@@ -254,24 +329,24 @@ class TestVolumeColumns(unittest.TestCase):
         support. The asserts fail on a three-place and a whole-number rounding
         alike."""
         row = self.one(ud_weighted=0.6349281, ud_20=2.8551749)
-        self.assertEqual(row["ud_weighted"], 0.63)
-        self.assertEqual(row["ud_20"], 2.86)
+        self.assertEqual(row[C_UD_W], 0.63)
+        self.assertEqual(row[C_UD_20], 2.86)
         disk = self.on_disk(ud_weighted=0.6349281, ud_20=2.8551749)
-        self.assertEqual(disk["ud_weighted"], "0.63")
-        self.assertEqual(disk["ud_20"], "2.86")
+        self.assertEqual(disk[C_UD_W], "0.63")
+        self.assertEqual(disk[C_UD_20], "2.86")
 
     def test_the_weighted_ratio_is_not_written_from_the_plain_one(self):
         """The pair a copy-paste most easily crosses, and the one case where
         crossing them inverts the finding: a plain ratio well above 1.0 beside a
         weighted ratio below it IS distribution into strength."""
         row = self.one(ud_ratio=1.90, ud_weighted=0.71)
-        self.assertEqual(row["ud_ratio"], 1.90)
-        self.assertEqual(row["ud_weighted"], 0.71)
+        self.assertEqual(row[C_UD_50], 1.90)
+        self.assertEqual(row[C_UD_W], 0.71)
 
     def test_the_twenty_bar_ratio_is_not_written_from_the_fifty_bar_one(self):
         row = self.one(ud_ratio=1.10, ud_20=2.40)
-        self.assertEqual(row["ud_ratio"], 1.10)
-        self.assertEqual(row["ud_20"], 2.40)
+        self.assertEqual(row[C_UD_50], 1.10)
+        self.assertEqual(row[C_UD_20], 2.40)
 
     def test_the_labels_are_written_verbatim_including_the_hyphens(self):
         """Nothing is title-cased, truncated or re-spelled on the way to the
@@ -279,12 +354,14 @@ class TestVolumeColumns(unittest.TestCase):
         filter the file on the label the screen showed them."""
         for signal in ("accumulation", "distribution-into-strength",
                        "supported", "distribution", "unknown"):
-            self.assertEqual(self.on_disk(volume_signal=signal)["volume_signal"],
-                             signal)
+            self.assertEqual(
+                self.on_disk(volume_signal=signal)["volume_signal_reading"],
+                signal)
         for trend in ("strengthening", "steady", "flattening", "fading",
                       "reversed", "unknown"):
             self.assertEqual(
-                self.on_disk(accumulation_trend=trend)["accumulation_trend"],
+                self.on_disk(
+                    accumulation_trend=trend)["accumulation_trend_reading"],
                 trend)
 
     def test_the_two_labels_are_not_transposed(self):
@@ -292,47 +369,49 @@ class TestVolumeColumns(unittest.TestCase):
         `supported`, so a swap cannot pass as a plausible row."""
         disk = self.on_disk(volume_signal="supported",
                             accumulation_trend="steady")
-        self.assertEqual(disk["volume_signal"], "supported")
-        self.assertEqual(disk["accumulation_trend"], "steady")
+        self.assertEqual(disk["volume_signal_reading"], "supported")
+        self.assertEqual(disk["accumulation_trend_reading"], "steady")
 
     def test_a_missing_value_is_an_empty_cell_and_never_the_word_none(self):
         """One field at a time, so no assertion is satisfied by a row that
         blanked the whole block. `str(None)` would write the four characters
         `None`, which sorts and filters as if it were a label of its own -- and
         for the ratios it would break every consumer that sums the column."""
-        for key in self.RATIOS + self.LABELS:
-            with self.subTest(field=key):
-                row = self.one(**{key: None})
-                self.assertEqual(row[key], "")
-                disk = self.on_disk(**{key: None})
-                self.assertEqual(disk[key], "")
+        for field, column in self.RATIOS + self.LABELS:
+            with self.subTest(field=field):
+                row = self.one(**{field: None})
+                self.assertEqual(row[column], "")
+                disk = self.on_disk(**{field: None})
+                self.assertEqual(disk[column], "")
                 self.assertNotIn("None", list(disk.values()))
-                for other in self.RATIOS + self.LABELS:
-                    if other != key:
-                        self.assertNotEqual(disk[other], "", other)
+                for other_field, other_column in self.RATIOS + self.LABELS:
+                    if other_field != field:
+                        self.assertNotEqual(disk[other_column], "",
+                                            other_column)
 
     def test_a_measured_zero_ratio_is_written_as_zero_not_left_blank(self):
         """0.0 on the weighted ratio is a name whose every up-bar closed at its
         low -- measured, not missing. `if v is None`, never `if not v`."""
-        for key in ("ud_weighted", "ud_20"):
-            with self.subTest(field=key):
-                self.assertEqual(self.one(**{key: 0.0})[key], 0.0)
-                self.assertEqual(self.on_disk(**{key: 0.0})[key], "0.0")
+        for field, column in (("ud_weighted", C_UD_W), ("ud_20", C_UD_20)):
+            with self.subTest(field=field):
+                self.assertEqual(self.one(**{field: 0.0})[column], 0.0)
+                self.assertEqual(self.on_disk(**{field: 0.0})[column], "0.0")
 
     def test_an_empty_label_string_is_kept_rather_than_becoming_none(self):
         """The sibling arm of the None case: `""` is not None, so text() must
         leave it alone rather than routing it through the same branch."""
-        self.assertEqual(self.one(volume_signal="")["volume_signal"], "")
+        self.assertEqual(self.one(volume_signal="")["volume_signal_reading"],
+                         "")
 
     def test_a_row_missing_any_new_field_raises_rather_than_writing_a_blank(self):
         """The sibling arm of the None case. None is a value that could not be
         formed and is a blank cell honestly; a MISSING key is a caller that never
         built the row build_result_row promises, and `.get` would blank -- or,
         on a label, invent the real word `unknown` for -- the whole column."""
-        for key in self.NEW:
-            with self.subTest(field=key):
+        for field, _column in self.NEW:
+            with self.subTest(field=field):
                 r = result()
-                del r[key]
+                del r[field]
                 with self.assertRaises(KeyError):
                     build([scanned()], {"LEADER": [r]}, ["LEADER"])
 
@@ -355,16 +434,18 @@ class TestVolumeColumns(unittest.TestCase):
                                                       "matched": ["COILED",
                                                                   "LEADER"]})]},
                      ["COILED", "LEADER", "CONFLUENCE"])
-        by_setup = {r["setup"]: r for r in rows}
+        by_setup = {r["setup_name"]: r for r in rows}
         self.assertEqual(sorted(by_setup), ["COILED", "CONFLUENCE", "LEADER"])
-        self.assertEqual({k: v["ud_weighted"] for k, v in by_setup.items()},
+        self.assertEqual({k: v[C_UD_W] for k, v in by_setup.items()},
                          {"COILED": 0.11, "LEADER": 0.22, "CONFLUENCE": 0.33})
-        self.assertEqual({k: v["ud_20"] for k, v in by_setup.items()},
+        self.assertEqual({k: v[C_UD_20] for k, v in by_setup.items()},
                          {"COILED": 1.11, "LEADER": 2.22, "CONFLUENCE": 3.33})
-        self.assertEqual({k: v["volume_signal"] for k, v in by_setup.items()},
+        self.assertEqual({k: v["volume_signal_reading"]
+                          for k, v in by_setup.items()},
                          {"COILED": "accumulation", "LEADER": "supported",
                           "CONFLUENCE": "distribution"})
-        self.assertEqual({k: v["accumulation_trend"] for k, v in by_setup.items()},
+        self.assertEqual({k: v["accumulation_trend_reading"]
+                          for k, v in by_setup.items()},
                          {"COILED": "strengthening", "LEADER": "fading",
                           "CONFLUENCE": "reversed"})
 
@@ -376,35 +457,133 @@ class TestSchema(unittest.TestCase):
 
     def test_the_up_down_ratio_sits_beside_relative_strength(self):
         """A universal metric, not an evidence slot: it means the same thing on
-        every row of every setup, so it lives with rs_1m/rs_3m and risk_reward
-        rather than in the per-setup evidence pair."""
+        every row of every setup, so it lives with the two relative-strength
+        columns and the risk:reward one rather than in the per-setup evidence
+        pair."""
         cols = csv_export.COLUMNS
-        self.assertEqual(cols[cols.index("rs_3m") + 1], "ud_ratio")
-        self.assertNotIn("ud_ratio", [k for pair in csv_export.EVIDENCE.values()
-                                      for k, _ in pair])
+        self.assertEqual(cols[cols.index(C_RS_3M) + 1], C_UD_50)
+        self.assertNotIn(C_UD_50, [k for pair in csv_export.EVIDENCE.values()
+                                   for k, _ in pair])
 
     def test_the_four_new_volume_columns_follow_ud_ratio_in_order(self):
         """Asserted as a contiguous slice, not four `in COLUMNS` checks: order
         is the schema. A column emitted one position late shifts every value to
         its right in a file whose reader keys on position."""
         cols = csv_export.COLUMNS
-        start = cols.index("ud_ratio")
+        start = cols.index(C_UD_50)
         self.assertEqual(cols[start:start + 5],
-                         ["ud_ratio", "ud_weighted", "ud_20", "volume_signal",
-                          "accumulation_trend"])
-        self.assertEqual(cols[start + 5], "setups_matched")
+                         [C_UD_50, C_UD_W, C_UD_20, "volume_signal_reading",
+                          "accumulation_trend_reading"])
+        self.assertEqual(cols[start + 5], "all_setups_matched")
 
     def test_the_new_volume_columns_are_not_evidence_slots(self):
-        """Like ud_ratio: they mean the same thing on every row of every setup,
-        including CONFLUENCE, whose two evidence slots are already spoken for."""
+        """Like the 50-day ratio: they mean the same thing on every row of every
+        setup, including CONFLUENCE, whose two evidence slots are already spoken
+        for."""
         evidence_keys = [k for pair in csv_export.EVIDENCE.values()
                          for k, _ in pair]
-        for name in ("ud_weighted", "ud_20", "volume_signal",
-                     "accumulation_trend"):
+        for name in (C_UD_W, C_UD_20, "volume_signal_reading",
+                     "accumulation_trend_reading"):
             self.assertNotIn(name, evidence_keys)
 
     def test_no_column_name_is_repeated(self):
         self.assertEqual(len(set(csv_export.COLUMNS)), len(csv_export.COLUMNS))
+
+
+class TestSelfDescribingHeaders(unittest.TestCase):
+    """The naming rule itself: a header states what the number is and in what
+    unit, so the file is readable without the key beside it.
+
+    These assertions exist because the rule is the point of the schema, not a
+    formatting preference. A future column that reverts to `ud_5` or `rs_6m`
+    has to fail something.
+    """
+
+    def test_no_terse_legacy_name_survives_anywhere_in_the_schema(self):
+        """The exact names the rename replaced. Asserted as absent from the
+        COLUMNS list AND from a built row's keys, so a rename applied to only
+        one of the two is caught here rather than in a reader's spreadsheet."""
+        row = build([scanned()], {"LEADER": [result()]}, ["LEADER"])[0]
+        for old in INTERNAL_TO_COLUMN:
+            with self.subTest(old=old):
+                self.assertNotIn(old, csv_export.COLUMNS)
+                self.assertNotIn(old, row)
+
+    def test_the_renamed_columns_are_exactly_the_agreed_mapping(self):
+        """Every internal key maps to the column the schema actually publishes,
+        and the six unchanged names are unchanged. This is the assertion that a
+        rename to a merely PLAUSIBLE new name fails."""
+        unchanged = ["scan_date", "symbol", "sector"]
+        self.assertEqual(sorted(csv_export.COLUMNS),
+                         sorted(list(INTERNAL_TO_COLUMN.values()) + unchanged))
+        for name in unchanged:
+            self.assertIn(name, csv_export.COLUMNS)
+
+    def test_a_built_rows_keys_are_the_file_names_not_the_internal_ones(self):
+        """The two vocabularies are disjoint apart from the three names that
+        were already self-describing. A row dict that leaked build_result_row's
+        keys straight through would satisfy neither half of this."""
+        row = build([scanned()], {"LEADER": [result()]}, ["LEADER"])[0]
+        internal = result()
+        shared = set(row) & set(internal)
+        self.assertEqual(shared, {"symbol", "sector"})
+
+    def test_every_header_is_a_valid_snake_case_identifier(self):
+        """No spaces, no punctuation beyond `_`, never leading with a digit --
+        so `pandas` attribute access and spreadsheet formulas both work. The
+        verbosity is free at the keyboard only if this holds."""
+        import keyword
+        import re
+        for name in csv_export.COLUMNS:
+            with self.subTest(column=name):
+                self.assertTrue(name.isidentifier(), name)
+                self.assertFalse(keyword.iskeyword(name), name)
+                self.assertRegex(name, r"^[a-z][a-z0-9_]*$", name)
+                self.assertNotIn("__", name)
+                self.assertFalse(name.endswith("_"), name)
+
+    def test_no_header_is_a_substring_of_another(self):
+        """The failure two overlapping verbose names would cause, pinned
+        directly: a reader grepping for `up_down_volume_ratio_20d` must not also
+        hit a longer column that contains it, and a substring-matching test
+        elsewhere must not be able to confuse the two."""
+        for a in csv_export.COLUMNS:
+            for b in csv_export.COLUMNS:
+                if a is not b:
+                    self.assertNotIn(a, b, "%s inside %s" % (a, b))
+
+    def test_every_measurement_column_carries_its_unit_or_scale(self):
+        """The rule in the form a future column has to satisfy: the columns
+        holding a NUMBER say what scale it is on. Bare identity columns --
+        symbol, sector, the two dates, the setup name -- are self-describing
+        already and are exempt by name, not by pattern, so a new numeric column
+        cannot slip in by being short.
+        """
+        exempt = {"scan_date", "last_closed_bar_date", "universe_name",
+                  "threshold_mode", "symbol", "sector", "setup_name",
+                  "rank_within_setup", "action_bucket",
+                  "risk_reward_veto_applied",
+                  "volume_signal_reading", "accumulation_trend_reading",
+                  "all_setups_matched", "setups_matched_count",
+                  "evidence_1_metric_name", "evidence_1_metric_value",
+                  "evidence_2_metric_name", "evidence_2_metric_value",
+                  "warning_flags"}
+        units = ("_0_to_10", "_pct_points", "_ratio_", "ratio_50d",
+                 "ratio_20d", "price", "_atr_")
+        for name in csv_export.COLUMNS:
+            if name in exempt:
+                continue
+            with self.subTest(column=name):
+                self.assertTrue(any(u in name for u in units),
+                                "%s states no unit or scale" % name)
+
+    def test_the_module_records_the_rule_for_the_next_column(self):
+        """The rule lives in csv_export's own docstring, where someone adding a
+        column reads it, not only in SKILL.md."""
+        doc = csv_export.__doc__
+        self.assertIn("WITHOUT THE", doc.upper())
+        self.assertIn("READER CONSULTING THE KEY", doc.upper())
+        self.assertIn("UNIT", doc.upper())
 
     def test_a_built_row_carries_exactly_the_schema_keys(self):
         rows = build([scanned()], {"LEADER": [result()]}, ["LEADER"])
@@ -493,9 +672,9 @@ class TestBuildRows(unittest.TestCase):
                      scan_date="2026-08-02", last_closed_bar="2026-07-31",
                      universe="nifty500", mode="strict")
         self.assertEqual(rows[0]["scan_date"], "02-Aug-2026")
-        self.assertEqual(rows[0]["last_closed_bar"], "31-Jul-2026")
-        self.assertEqual(rows[0]["universe"], "nifty500")
-        self.assertEqual(rows[0]["mode"], "strict")
+        self.assertEqual(rows[0]["last_closed_bar_date"], "31-Jul-2026")
+        self.assertEqual(rows[0]["universe_name"], "nifty500")
+        self.assertEqual(rows[0]["threshold_mode"], "strict")
 
 
 class TestDateCells(unittest.TestCase):
@@ -585,7 +764,7 @@ class TestDateCells(unittest.TestCase):
             self.assertTrue(body.startswith("02-Aug-2026,31-Jul-2026,"), body)
             back = read_back(path)[0]
             self.assertEqual(back["scan_date"], "02-Aug-2026")
-            self.assertEqual(back["last_closed_bar"], "31-Jul-2026")
+            self.assertEqual(back["last_closed_bar_date"], "31-Jul-2026")
 
     def test_one_row_per_symbol_setup_pair(self):
         scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
@@ -596,7 +775,7 @@ class TestDateCells(unittest.TestCase):
                                                            "label": "COILED+LEADER",
                                                            "mean_fit": 8.0})]}
         rows = build(scan_rows, by_setup, ["COILED", "LEADER", "CONFLUENCE"])
-        self.assertEqual([r["setup"] for r in rows],
+        self.assertEqual([r["setup_name"] for r in rows],
                          ["COILED", "LEADER", "CONFLUENCE"])
         self.assertEqual({r["symbol"] for r in rows}, {"TCS"})
 
@@ -606,8 +785,8 @@ class TestDateCells(unittest.TestCase):
                     "LEADER": [result("TCS")]}
         rows = build(scan_rows, by_setup, ["COILED", "LEADER"])
         for r in rows:
-            self.assertEqual(r["setups_matched"], "COILED|LEADER")
-            self.assertEqual(r["match_count"], 2)
+            self.assertEqual(r["all_setups_matched"], "COILED|LEADER")
+            self.assertEqual(r["setups_matched_count"], 2)
 
     def test_setups_matched_reports_setups_this_export_did_not_ask_for(self):
         """--setup coiled still says the name is also a LEADER: the question is
@@ -616,37 +795,37 @@ class TestDateCells(unittest.TestCase):
                      {"COILED": [result("TCS", evidence=dict(COILED_EV))]},
                      ["COILED"])
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["setups_matched"], "COILED|LEADER")
-        self.assertEqual(rows[0]["match_count"], 2)
+        self.assertEqual(rows[0]["all_setups_matched"], "COILED|LEADER")
+        self.assertEqual(rows[0]["setups_matched_count"], 2)
 
     def test_setups_matched_is_life_cycle_ordered_not_alphabetical(self):
         rows = build([scanned("TCS", ("TURN", "COILED", "BREAKOUT"))],
                      {"LEADER": [result("TCS")]}, ["LEADER"])
-        self.assertEqual(rows[0]["setups_matched"], "COILED|BREAKOUT|TURN")
+        self.assertEqual(rows[0]["all_setups_matched"], "COILED|BREAKOUT|TURN")
 
     def test_confluence_is_not_counted_as_a_matched_setup(self):
         scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
         scan_rows[0]["matched"]["CONFLUENCE"] = {"fit": 8.0, "evidence": {}}
         rows = build(scan_rows, {"LEADER": [result("TCS")]}, ["LEADER"])
-        self.assertEqual(rows[0]["setups_matched"], "COILED|LEADER")
-        self.assertEqual(rows[0]["match_count"], 2)
+        self.assertEqual(rows[0]["all_setups_matched"], "COILED|LEADER")
+        self.assertEqual(rows[0]["setups_matched_count"], 2)
 
     def test_a_single_setup_name_still_gets_the_pair_of_columns(self):
         rows = build([scanned("TCS", ("LEADER",))],
                      {"LEADER": [result("TCS")]}, ["LEADER"])
-        self.assertEqual(rows[0]["setups_matched"], "LEADER")
-        self.assertEqual(rows[0]["match_count"], 1)
+        self.assertEqual(rows[0]["all_setups_matched"], "LEADER")
+        self.assertEqual(rows[0]["setups_matched_count"], 1)
 
     def test_a_row_whose_symbol_never_scanned_degrades_instead_of_crashing(self):
         rows = build([scanned("TCS")], {"LEADER": [result("GHOST")]}, ["LEADER"])
-        self.assertEqual(rows[0]["setups_matched"], "")
-        self.assertEqual(rows[0]["match_count"], 0)
+        self.assertEqual(rows[0]["all_setups_matched"], "")
+        self.assertEqual(rows[0]["setups_matched_count"], 0)
 
     def test_rank_is_one_based_and_follows_the_given_order(self):
         by_setup = {"LEADER": [result("A"), result("B"), result("C")]}
         rows = build([scanned("A"), scanned("B"), scanned("C")],
                      by_setup, ["LEADER"])
-        self.assertEqual([(r["symbol"], r["rank"]) for r in rows],
+        self.assertEqual([(r["symbol"], r["rank_within_setup"]) for r in rows],
                          [("A", 1), ("B", 2), ("C", 3)])
 
     def test_rank_restarts_at_one_for_each_setup(self):
@@ -655,7 +834,8 @@ class TestDateCells(unittest.TestCase):
                     "LEADER": [result("C")]}
         rows = build([scanned("A"), scanned("B"), scanned("C")],
                      by_setup, ["COILED", "LEADER"])
-        self.assertEqual([(r["setup"], r["rank"]) for r in rows],
+        self.assertEqual([(r["setup_name"], r["rank_within_setup"])
+                          for r in rows],
                          [("COILED", 1), ("COILED", 2), ("LEADER", 1)])
 
     def test_setups_are_emitted_in_the_chosen_order(self):
@@ -663,12 +843,12 @@ class TestDateCells(unittest.TestCase):
                     "LEADER": [result("B")]}
         rows = build([scanned("A"), scanned("B")], by_setup,
                      ["LEADER", "COILED"])
-        self.assertEqual([r["setup"] for r in rows], ["LEADER", "COILED"])
+        self.assertEqual([r["setup_name"] for r in rows], ["LEADER", "COILED"])
 
     def test_a_chosen_setup_with_no_matches_contributes_no_rows(self):
         rows = build([scanned("A")], {"LEADER": [result("A")], "TURN": []},
                      ["LEADER", "TURN"])
-        self.assertEqual([r["setup"] for r in rows], ["LEADER"])
+        self.assertEqual([r["setup_name"] for r in rows], ["LEADER"])
 
     def test_the_cap_is_enforced_where_the_rows_are_built(self):
         """Not only through main(): any caller of build_rows gets the cap, so a
@@ -679,7 +859,7 @@ class TestDateCells(unittest.TestCase):
         self.assertEqual(len(rows), csv_export.MAX_ROWS_PER_SETUP)
         self.assertEqual([r["symbol"] for r in rows],
                          syms[:csv_export.MAX_ROWS_PER_SETUP])
-        self.assertEqual([r["rank"] for r in rows],
+        self.assertEqual([r["rank_within_setup"] for r in rows],
                          list(range(1, csv_export.MAX_ROWS_PER_SETUP + 1)))
 
     def test_a_setup_at_exactly_the_cap_keeps_every_row(self):
@@ -692,7 +872,7 @@ class TestDateCells(unittest.TestCase):
     def test_a_chosen_setup_absent_from_the_map_contributes_no_rows(self):
         rows = build([scanned("A")], {"LEADER": [result("A")]},
                      ["LEADER", "PULLBACK"])
-        self.assertEqual([r["setup"] for r in rows], ["LEADER"])
+        self.assertEqual([r["setup_name"] for r in rows], ["LEADER"])
 
 
 class TestEvidenceColumns(unittest.TestCase):
@@ -703,22 +883,22 @@ class TestEvidenceColumns(unittest.TestCase):
 
     def test_coiled_emits_contraction_and_position_in_base(self):
         r = self._row("COILED", {"contraction": 0.61, "pos_in_base": 0.98172})
-        self.assertEqual(r["evidence_1_label"], "contraction")
-        self.assertEqual(r["evidence_1_value"], 0.61)
-        self.assertEqual(r["evidence_2_label"], "pos_in_base")
-        self.assertEqual(r["evidence_2_value"], 0.982)
+        self.assertEqual(r["evidence_1_metric_name"], "contraction")
+        self.assertEqual(r["evidence_1_metric_value"], 0.61)
+        self.assertEqual(r["evidence_2_metric_name"], "pos_in_base")
+        self.assertEqual(r["evidence_2_metric_value"], 0.982)
 
     def test_position_in_base_stays_a_fraction_rather_than_a_percent_string(self):
         r = self._row("COILED", {"contraction": 0.61, "pos_in_base": 0.982})
-        self.assertNotIsInstance(r["evidence_2_value"], str)
-        self.assertLess(r["evidence_2_value"], 1.0)
+        self.assertNotIsInstance(r["evidence_2_metric_value"], str)
+        self.assertLess(r["evidence_2_metric_value"], 1.0)
 
     def test_breakout_emits_volume_multiple_and_extension_as_bare_numbers(self):
         r = self._row("BREAKOUT", {"vol_mult": 4.1064, "pct_above_base": 6.2171,
                                    "volume_light": False})
-        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+        self.assertEqual((r["evidence_1_metric_name"], r["evidence_1_metric_value"]),
                          ("vol_mult", 4.106))
-        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+        self.assertEqual((r["evidence_2_metric_name"], r["evidence_2_metric_value"]),
                          ("pct_above_base", 6.217))
 
     def test_leader_emits_stack_completeness_not_a_second_copy_of_rs_1m(self):
@@ -727,15 +907,15 @@ class TestEvidenceColumns(unittest.TestCase):
         fit_leader and appears nowhere else in the row."""
         r = self._row("LEADER", {"pct_from_high": 3.4567, "rs_1m": 6.2178,
                                  "full_stack": True})
-        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+        self.assertEqual((r["evidence_1_metric_name"], r["evidence_1_metric_value"]),
                          ("pct_from_high", 3.457))
-        self.assertEqual(r["evidence_2_label"], "ma_stack_full")
-        self.assertEqual(r["evidence_2_value"], 1)
-        self.assertNotIn("rs_1m", (r["evidence_1_label"], r["evidence_2_label"]))
+        self.assertEqual(r["evidence_2_metric_name"], "ma_stack_full")
+        self.assertEqual(r["evidence_2_metric_value"], 1)
+        self.assertNotIn("rs_1m", (r["evidence_1_metric_name"], r["evidence_2_metric_name"]))
 
     def test_an_incomplete_stack_is_zero_rather_than_blank(self):
         r = self._row("LEADER", {"pct_from_high": 3.4, "full_stack": False})
-        self.assertEqual(r["evidence_2_value"], 0)
+        self.assertEqual(r["evidence_2_metric_value"], 0)
 
     def test_leader_evidence_keys_exist_on_the_real_predicates_output(self):
         """Pins the export to match_leader's actual evidence dict, so renaming
@@ -756,17 +936,17 @@ class TestEvidenceColumns(unittest.TestCase):
                                    "close_position": 0.73578,
                                    "retrace_pct": 17.0567,
                                    "retrace_of_52w_range_pct": 33.0})
-        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+        self.assertEqual((r["evidence_1_metric_name"], r["evidence_1_metric_value"]),
                          ("close_position", 0.736))
-        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+        self.assertEqual((r["evidence_2_metric_name"], r["evidence_2_metric_value"]),
                          ("retrace_pct", 17.057))
 
     def test_pullback_close_position_stays_a_fraction_in_the_file(self):
         """The terminal prints 74%; the file keeps 0.736, like pos_in_base."""
         r = self._row("PULLBACK", {"close_position": 0.73578,
                                    "retrace_pct": 17.0567})
-        self.assertNotIsInstance(r["evidence_1_value"], str)
-        self.assertLess(r["evidence_1_value"], 1.0)
+        self.assertNotIsInstance(r["evidence_1_metric_value"], str)
+        self.assertLess(r["evidence_1_metric_value"], 1.0)
 
     def test_pullback_publishes_the_swing_retracement_not_the_range_share(self):
         """The two are different numbers on different scales and the file must
@@ -775,7 +955,7 @@ class TestEvidenceColumns(unittest.TestCase):
         r = self._row("PULLBACK", {"close_position": 0.74,
                                    "retrace_pct": 17.0567,
                                    "retrace_of_52w_range_pct": 33.0})
-        self.assertEqual(r["evidence_2_value"], 17.057)
+        self.assertEqual(r["evidence_2_metric_value"], 17.057)
 
     def test_pullback_evidence_keys_exist_on_the_real_predicates_output(self):
         """Pins the export to match_pullback's actual evidence dict, so renaming
@@ -787,9 +967,9 @@ class TestEvidenceColumns(unittest.TestCase):
 
     def test_turn_emits_bars_since_cross_and_the_macd_histogram(self):
         r = self._row("TURN", {"bars_since_cross": 12, "macd_hist": 1.23456})
-        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+        self.assertEqual((r["evidence_1_metric_name"], r["evidence_1_metric_value"]),
                          ("bars_since_cross", 12))
-        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+        self.assertEqual((r["evidence_2_metric_name"], r["evidence_2_metric_value"]),
                          ("macd_hist", 1.235))
 
     def test_confluence_leaves_both_evidence_pairs_blank(self):
@@ -797,23 +977,23 @@ class TestEvidenceColumns(unittest.TestCase):
         r = self._row("CONFLUENCE", {"matched": ["COILED", "LEADER"],
                                      "count": 2, "label": "COILED+LEADER",
                                      "mean_fit": 8.0})
-        self.assertEqual(r["evidence_1_label"], "")
-        self.assertEqual(r["evidence_1_value"], "")
-        self.assertEqual(r["evidence_2_label"], "")
-        self.assertEqual(r["evidence_2_value"], "")
-        self.assertEqual(r["setups_matched"], "COILED|LEADER")
+        self.assertEqual(r["evidence_1_metric_name"], "")
+        self.assertEqual(r["evidence_1_metric_value"], "")
+        self.assertEqual(r["evidence_2_metric_name"], "")
+        self.assertEqual(r["evidence_2_metric_value"], "")
+        self.assertEqual(r["all_setups_matched"], "COILED|LEADER")
 
     def test_a_missing_evidence_key_blanks_the_value_but_keeps_the_label(self):
         r = self._row("COILED", {"contraction": 0.61})
-        self.assertEqual(r["evidence_2_label"], "pos_in_base")
-        self.assertEqual(r["evidence_2_value"], "")
+        self.assertEqual(r["evidence_2_metric_name"], "pos_in_base")
+        self.assertEqual(r["evidence_2_metric_value"], "")
 
 
 class TestFlags(unittest.TestCase):
     def _flags(self, evidence, setup="BREAKOUT"):
         return build([scanned("TCS", (setup,))],
                      {setup: [result("TCS", evidence=evidence)]},
-                     [setup])[0]["flags"]
+                     [setup])[0]["warning_flags"]
 
     def test_a_light_volume_breakout_carries_the_flag(self):
         self.assertEqual(self._flags({"vol_mult": 1.7, "pct_above_base": 2.0,
@@ -837,7 +1017,7 @@ class TestFlags(unittest.TestCase):
                                                       "pct_above_base": 2.0,
                                                       "volume_light": True})]},
                 ["BREAKOUT"]))
-            self.assertEqual(read_back(path)[0]["flags"], "volume_light")
+            self.assertEqual(read_back(path)[0]["warning_flags"], "volume_light")
 
     def test_the_flag_matches_the_threshold_stock_analyser_defines(self):
         """1.5-2.0x is the near-miss band; 2x is a confirmed trigger."""
@@ -852,28 +1032,28 @@ class TestValueTypes(unittest.TestCase):
                                         rs_1m=6.2178, rs_3m=-3.26)]},
                      ["LEADER"])
         r = rows[0]
-        self.assertEqual(r["setup_fit"], 8.13)
-        self.assertEqual(r["score_now"], 6.21)
-        self.assertEqual(r["score_at_trigger"], 7.17)
-        self.assertEqual(r["risk_reward"], 2.44)
-        self.assertEqual(r["rs_1m"], 6.2)
-        self.assertEqual(r["rs_3m"], -3.3)
+        self.assertEqual(r[C_FIT], 8.13)
+        self.assertEqual(r[C_SCORE_NOW], 6.21)
+        self.assertEqual(r[C_SCORE_TRIG], 7.17)
+        self.assertEqual(r[C_RR], 2.44)
+        self.assertEqual(r[C_RS_1M], 6.2)
+        self.assertEqual(r[C_RS_3M], -3.3)
 
     def test_prices_round_to_two_places(self):
         rows = build([scanned()],
                      {"LEADER": [result(price=1234.5678, trigger_price=1240.1234,
                                         stop=1180.9876)]}, ["LEADER"])
-        self.assertEqual(rows[0]["price"], 1234.57)
-        self.assertEqual(rows[0]["trigger_price"], 1240.12)
-        self.assertEqual(rows[0]["stop"], 1180.99)
+        self.assertEqual(rows[0]["last_price"], 1234.57)
+        self.assertEqual(rows[0][C_TRIGGER_PX], 1240.12)
+        self.assertEqual(rows[0][C_STOP], 1180.99)
 
     def test_none_values_become_empty_strings_across_the_row(self):
         rows = build([scanned()],
                      {"LEADER": [result(trigger_total=None, trigger_price=None,
                                         stop=None, rr=None, rs_1m=None,
                                         rs_3m=None)]}, ["LEADER"])
-        for col in ("score_at_trigger", "trigger_price", "stop", "risk_reward",
-                    "rs_1m", "rs_3m"):
+        for col in (C_SCORE_TRIG, C_TRIGGER_PX, C_STOP, C_RR,
+                    C_RS_1M, C_RS_3M):
             self.assertEqual(rows[0][col], "", col)
 
     def test_none_never_reaches_the_file_as_the_word_none(self):
@@ -892,14 +1072,14 @@ class TestValueTypes(unittest.TestCase):
                       ["LEADER"])[0]
         veto = build([scanned()], {"LEADER": [result(vetoed=True)]},
                      ["LEADER"])[0]
-        self.assertEqual(clean["vetoed"], 0)
-        self.assertEqual(veto["vetoed"], 1)
-        self.assertNotIsInstance(veto["vetoed"], bool)
+        self.assertEqual(clean["risk_reward_veto_applied"], 0)
+        self.assertEqual(veto["risk_reward_veto_applied"], 1)
+        self.assertNotIsInstance(veto["risk_reward_veto_applied"], bool)
 
     def test_the_action_word_is_carried_through_verbatim(self):
         rows = build([scanned()], {"LEADER": [result(action="BUY HALF")]},
                      ["LEADER"])
-        self.assertEqual(rows[0]["action"], "BUY HALF")
+        self.assertEqual(rows[0]["action_bucket"], "BUY HALF")
 
     def test_no_numeric_cell_in_the_file_carries_a_unit_symbol(self):
         with tmpdir() as d:
@@ -909,9 +1089,9 @@ class TestValueTypes(unittest.TestCase):
                 {"BREAKOUT": [result("TCS", evidence=dict(BREAKOUT_EV))]},
                 ["BREAKOUT"]))
             row = read_back(path)[0]
-            for col in ("setup_fit", "score_now", "risk_reward", "price",
-                        "rs_1m", "rs_3m", "evidence_1_value",
-                        "evidence_2_value"):
+            for col in (C_FIT, C_SCORE_NOW, C_RR, "last_price",
+                        C_RS_1M, C_RS_3M, "evidence_1_metric_value",
+                        "evidence_2_metric_value"):
                 self.assertNotIn("%", row[col], col)
                 self.assertNotIn("x", row[col], col)
                 float(row[col])          # sortable without any stripping
@@ -1170,7 +1350,7 @@ class TestMainCsv(unittest.TestCase):
             self.assertIn("showing top 2 of 4", out)
             rows = read_back(path)
             self.assertEqual(len(rows), 4)
-            self.assertEqual([r["rank"] for r in rows], ["1", "2", "3", "4"])
+            self.assertEqual([r["rank_within_setup"] for r in rows], ["1", "2", "3", "4"])
 
     def test_the_file_keeps_twenty_rows_per_setup_and_no_more(self):
         """31 matches, and the file holds the top 20 with contiguous ranks."""
@@ -1181,7 +1361,7 @@ class TestMainCsv(unittest.TestCase):
             self.assertEqual(rc, 0)
             rows = read_back(path)
             self.assertEqual(len(rows), 20)
-            self.assertEqual([int(r["rank"]) for r in rows],
+            self.assertEqual([int(r["rank_within_setup"]) for r in rows],
                              list(range(1, 21)))
             self.assertIn("wrote 20 rows", err)
 
@@ -1222,7 +1402,8 @@ class TestMainCsv(unittest.TestCase):
             self.assertEqual(len(back), 40)
             for name in ("COILED", "LEADER"):
                 self.assertEqual(
-                    [int(r["rank"]) for r in back if r["setup"] == name],
+                    [int(r["rank_within_setup"]) for r in back
+                     if r["setup_name"] == name],
                     list(range(1, 21)), name)
 
     def test_a_full_scan_writes_at_most_a_hundred_and_twenty_rows(self):
@@ -1241,7 +1422,7 @@ class TestMainCsv(unittest.TestCase):
             rows = read_back(path)
             self.assertEqual(shown, ["SYM0", "SYM1"])
             self.assertEqual([r["symbol"] for r in rows
-                              if int(r["rank"]) <= 2], shown)
+                              if int(r["rank_within_setup"]) <= 2], shown)
             self.assertEqual([r["symbol"] for r in rows],
                              ["SYM0", "SYM1", "SYM2", "SYM3"])
 
@@ -1255,28 +1436,28 @@ class TestMainCsv(unittest.TestCase):
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "coiled", "--csv", path], rows)
             back = read_back(path)
-            self.assertEqual([r["setup"] for r in back], ["COILED"])
-            self.assertEqual(back[0]["setups_matched"], "COILED|LEADER")
+            self.assertEqual([r["setup_name"] for r in back], ["COILED"])
+            self.assertEqual(back[0]["all_setups_matched"], "COILED|LEADER")
 
     def test_strict_is_recorded_in_the_mode_column(self):
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "leader", "--strict", "--csv", path],
                      self._rows(1))
-            self.assertEqual(read_back(path)[0]["mode"], "strict")
+            self.assertEqual(read_back(path)[0]["threshold_mode"], "strict")
 
     def test_a_loosened_scan_says_so_in_the_mode_column(self):
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "leader", "--csv", path], self._rows(1))
-            self.assertEqual(read_back(path)[0]["mode"], "loosened")
+            self.assertEqual(read_back(path)[0]["threshold_mode"], "loosened")
 
     def test_the_universe_column_is_the_universe_not_the_filename(self):
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "leader", "--universe", "/x/y/nifty500.txt",
                       "--csv", path], self._rows(1))
-            self.assertEqual(read_back(path)[0]["universe"], "nifty500")
+            self.assertEqual(read_back(path)[0]["universe_name"], "nifty500")
 
     def test_csv_and_json_are_independent_and_compose(self):
         import json
@@ -1346,21 +1527,21 @@ class TestMainCsv(unittest.TestCase):
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "all", "--csv", path], rows)
-            back = {r["setup"]: r for r in read_back(path)}
+            back = {r["setup_name"]: r for r in read_back(path)}
             self.assertEqual(sorted(back), ["COILED", "CONFLUENCE", "LEADER"])
             conf = back["CONFLUENCE"]
-            self.assertEqual(conf["evidence_1_label"], "")
-            self.assertEqual(conf["evidence_2_value"], "")
-            self.assertEqual(conf["setups_matched"], "COILED|LEADER")
-            self.assertEqual(conf["match_count"], "2")
-            self.assertEqual(back["LEADER"]["setups_matched"], "COILED|LEADER")
+            self.assertEqual(conf["evidence_1_metric_name"], "")
+            self.assertEqual(conf["evidence_2_metric_value"], "")
+            self.assertEqual(conf["all_setups_matched"], "COILED|LEADER")
+            self.assertEqual(conf["setups_matched_count"], "2")
+            self.assertEqual(back["LEADER"]["all_setups_matched"], "COILED|LEADER")
 
     def test_the_file_carries_the_scans_own_last_closed_bar(self):
         """...and prints it as a date a spreadsheet will not turn into 46234."""
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "leader", "--csv", path], self._rows(1))
-            self.assertEqual(read_back(path)[0]["last_closed_bar"], "31-Jul-2026")
+            self.assertEqual(read_back(path)[0]["last_closed_bar_date"], "31-Jul-2026")
 
     def test_the_scan_date_column_is_formatted_while_the_filename_is_not(self):
         """End to end through main(): the bare --csv flag names the file with
@@ -1413,7 +1594,8 @@ class TestLiveSmoke(unittest.TestCase):
             self.assertEqual(len(rows), expected)
             self.assertLessEqual(len(rows), cap * len(counts))
             for name, n in counts.items():
-                ranks = [int(r["rank"]) for r in rows if r["setup"] == name]
+                ranks = [int(r["rank_within_setup"]) for r in rows
+                         if r["setup_name"] == name]
                 # Contiguous 1..min(n, cap): the file holds the TOP of each
                 # ranking, not the --top 5 the terminal showed and not an
                 # arbitrary slice out of the middle.
@@ -1421,23 +1603,23 @@ class TestLiveSmoke(unittest.TestCase):
 
             all_setups = list(setups.SETUPS) + ["CONFLUENCE"]
             for r in rows:
-                self.assertIn(r["setup"], all_setups)
-                self.assertIn(r["vetoed"], ("0", "1"))
-                self.assertEqual(r["mode"], "loosened")
-                self.assertEqual(r["universe"], "nifty500")
+                self.assertIn(r["setup_name"], all_setups)
+                self.assertIn(r["risk_reward_veto_applied"], ("0", "1"))
+                self.assertEqual(r["threshold_mode"], "loosened")
+                self.assertEqual(r["universe_name"], "nifty500")
                 self.assertTrue(r["symbol"] and r["sector"])
-                float(r["score_now"])
-                float(r["setup_fit"])
+                float(r[C_SCORE_NOW])
+                float(r[C_FIT])
                 self.assertNotIn("None", list(r.values()))
                 self.assertNotIn("nan", list(r.values()))
-                matched = [m for m in r["setups_matched"].split("|") if m]
-                self.assertEqual(int(r["match_count"]), len(matched))
-                if r["setup"] != "CONFLUENCE":
-                    self.assertIn(r["setup"], matched)
-                    self.assertTrue(r["evidence_1_label"])
+                matched = [m for m in r["all_setups_matched"].split("|") if m]
+                self.assertEqual(int(r["setups_matched_count"]), len(matched))
+                if r["setup_name"] != "CONFLUENCE":
+                    self.assertIn(r["setup_name"], matched)
+                    self.assertTrue(r["evidence_1_metric_name"])
                 else:
-                    self.assertEqual(r["evidence_1_label"], "")
-                    self.assertGreaterEqual(int(r["match_count"]), 2)
+                    self.assertEqual(r["evidence_1_metric_name"], "")
+                    self.assertGreaterEqual(int(r["setups_matched_count"]), 2)
 
 
 if __name__ == "__main__":

@@ -2,16 +2,45 @@
 
 A stock matching three setups produces three rows. The schema is therefore
 stable: adding a seventh setup later costs zero new columns, and a reader can
-group by `setup` or filter on it without a wide table of mostly-empty fields.
+group by `setup_name` or filter on it without a wide table of mostly-empty
+fields.
 
-Two rules the schema depends on:
+THE NAMING RULE, which every column added after this one must follow:
 
-* `setups_matched` and `match_count` are on EVERY row, not only CONFLUENCE, so a
-  COILED row shows the stock is also a LEADER without a join back to the file.
+    A HEADER MUST CONVEY WHAT THE NUMBER IS AND IN WHAT UNIT, WITHOUT THE
+    READER CONSULTING THE KEY.
+
+The file is opened in Excel a month later by someone who does not have this
+skill's documentation beside them. `ud_20` told that reader nothing: not what
+was counted, not over how many bars, not whether high is good. `rs_3m` did not
+say whether 11.4 was a percent, a ratio or a rank, nor what it was measured
+against. `stop` did not say where the stop came from. So the headers are long
+and dull on purpose -- `up_down_volume_ratio_20d`,
+`relative_strength_3month_vs_nifty50_pct_points`,
+`stop_price_1p5_atr_below_last` -- and a header that needs a glossary entry to
+be understood is the bug, not the length that avoids it.
+
+Two mechanical constraints on that rule:
+
+* Valid snake_case identifiers: no spaces, no punctuation beyond `_`, never
+  leading with a digit. `pandas` attribute access and spreadsheet formulas both
+  stay comfortable, so the verbosity costs a reader nothing at the keyboard.
+  A decimal point in a name becomes `p` -- `1p5_atr`, not `1.5_atr`.
+* Names stay unique. Two columns whose names overlap or collide is the failure
+  the length is supposed to prevent, not one it excuses.
+
+Two further rules the schema depends on:
+
+* `all_setups_matched` and `setups_matched_count` are on EVERY row, not only
+  CONFLUENCE, so a COILED row shows the stock is also a LEADER without a join
+  back to the file.
 * Every value is a raw number -- `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"`;
   `pos_in_base` as `0.982`, not `"98%"`. A CSV that needs string-stripping before
   a column can be sorted is broken. The percent signs and multipliers live in
   screener.EVIDENCE_COLUMNS, which renders for a human reading a terminal.
+  The rule above is about the HEADER; this one is about the CELL, and they
+  reinforce each other: the unit lives in the name so it need not live in the
+  value.
 
 This module owns row building and file I/O only. The scan, the ranking and the
 terminal rendering stay in screener.py; the CSV is an additive output path that
@@ -23,17 +52,29 @@ import os
 
 import setups
 
-COLUMNS = ["scan_date", "last_closed_bar", "universe", "mode",
+# Thirty-one columns, in this order. The order is the schema -- a reader keying
+# on position sees every value to the right of a moved column shift -- so new
+# columns go where they belong semantically and the whole list is asserted, not
+# sampled.
+COLUMNS = ["scan_date", "last_closed_bar_date", "universe_name",
+           "threshold_mode",
            "symbol", "sector",
-           "setup", "rank", "setup_fit",
-           "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
-           "price", "trigger_price", "stop",
-           "rs_1m", "rs_3m", "ud_ratio", "ud_weighted", "ud_20",
-           "volume_signal", "accumulation_trend",
-           "setups_matched", "match_count",
-           "evidence_1_label", "evidence_1_value",
-           "evidence_2_label", "evidence_2_value",
-           "flags"]
+           "setup_name", "rank_within_setup", "setup_fit_score_0_to_10",
+           "score_now_catalyst_neutral_0_to_10",
+           "score_if_trigger_fires_0_to_10",
+           "risk_reward_ratio_vs_1p5_atr_stop", "risk_reward_veto_applied",
+           "action_bucket",
+           "last_price", "trigger_price_that_repairs_setup",
+           "stop_price_1p5_atr_below_last",
+           "relative_strength_1month_vs_nifty50_pct_points",
+           "relative_strength_3month_vs_nifty50_pct_points",
+           "up_down_volume_ratio_50d", "close_weighted_volume_ratio_50d",
+           "up_down_volume_ratio_20d",
+           "volume_signal_reading", "accumulation_trend_reading",
+           "all_setups_matched", "setups_matched_count",
+           "evidence_1_metric_name", "evidence_1_metric_value",
+           "evidence_2_metric_name", "evidence_2_metric_value",
+           "warning_flags"]
 
 # (column label, evidence key) x2 per setup. Mirrors screener.EVIDENCE_COLUMNS
 # in intent -- the pair that makes this a screener rather than a score dump --
@@ -45,7 +86,8 @@ COLUMNS = ["scan_date", "last_closed_bar", "universe", "mode",
 # fit_leader (25% of it) and appears nowhere else in the row.
 #
 # CONFLUENCE has no pair at all. Its evidence is the list of setups and the mean
-# fit, which the setups_matched and setup_fit columns already carry.
+# fit, which the all_setups_matched and setup_fit_score_0_to_10 columns already
+# carry.
 EVIDENCE = {
     "COILED":     [("contraction", "contraction"),
                    ("pos_in_base", "pos_in_base")],
@@ -94,8 +136,9 @@ UD_PLACES = 2
 # look like a data set when it is a shortlist, and invited exactly the sorting
 # and re-ranking downstream that screener.rank exists to prevent.
 #
-# The rows kept are the TOP of the ranking, so `rank` stays contiguous 1..20 and
-# a reader can still reproduce any terminal table from the file.
+# The rows kept are the TOP of the ranking, so `rank_within_setup` stays
+# contiguous 1..20 and a reader can still reproduce any terminal table from the
+# file.
 MAX_ROWS_PER_SETUP = 20
 
 DEFAULT_DIR = "scans"
@@ -140,9 +183,9 @@ def text(v):
 
     The same contract num() keeps for numbers, for the columns whose values are
     words. `str(v)` alone would write the four characters "None" into
-    volume_signal, which sorts and filters as though it were a label of its own
-    and reads, to anyone opening the file, like a fifth signal the key never
-    defines. An empty cell is the honest form of "no value here".
+    volume_signal_reading, which sorts and filters as though it were a label of
+    its own and reads, to anyone opening the file, like a fifth signal the key
+    never defines. An empty cell is the honest form of "no value here".
 
     Note this is NOT the same case as the "unknown" label: "unknown" is a real
     finding -- too little volume history to classify the name -- and arrives as
@@ -232,10 +275,11 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
     """One dict per (symbol, setup), in `chosen` order and then in rank order.
 
     `by_setup` is screener.main's already-ranked {setup: [result rows]} map, in
-    FULL -- never sliced to --top. The rank column preserves the terminal's
-    ordering because the list is literally the one the terminal ranked, so
-    `rank <= 15` reproduces the on-screen table exactly. --top governs terminal
-    readability alone and never reaches this function; the file's own ceiling is
+    FULL -- never sliced to --top. The rank_within_setup column preserves the
+    terminal's ordering because the list is literally the one the terminal
+    ranked, so `rank_within_setup <= 15` reproduces the on-screen table exactly.
+    --top governs terminal readability alone and never reaches this function;
+    the file's own ceiling is
     MAX_ROWS_PER_SETUP, applied here to the top of each ranking.
 
     `scan_rows` is scan()'s output, used only to answer "what else did this
@@ -262,53 +306,63 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
             # unreachable in practice; it is here so a caller mismatch degrades
             # to a thinner row rather than losing a finished scan to a KeyError.
             matched = matched_by_symbol.get(r["symbol"], [])
+            # The keys are the verbose COLUMNS names; the values come off the
+            # terse INTERNAL keys build_result_row publishes. The two
+            # vocabularies are deliberately separate: `r["rs_3m"]` is a field on
+            # an in-memory row that screener.py also ranks and renders from, and
+            # renaming it would reach into analyze.py's shape. Only the FILE's
+            # headers are verbose, because only the file is read cold.
             out.append({
                 # Formatted here and not by the caller: main() passes the same
                 # ISO scan_date to resolve_path, which must keep it ISO.
                 "scan_date": date_cell(scan_date),
-                "last_closed_bar": date_cell(last_closed_bar),
-                "universe": universe,
-                "mode": mode,
+                "last_closed_bar_date": date_cell(last_closed_bar),
+                "universe_name": universe,
+                "threshold_mode": mode,
                 "symbol": r["symbol"],
                 "sector": r["sector"],
-                "setup": name,
-                "rank": rank,
-                "setup_fit": num(r["fit"]),
-                "score_now": num(r["total"]),
-                "score_at_trigger": num(r["trigger_total"]),
-                "risk_reward": num(r["rr"]),
-                "vetoed": int(bool(r["vetoed"])),
-                "action": r["action"],
-                "price": num(r["price"]),
-                "trigger_price": num(r["trigger_price"]),
-                "stop": num(r["stop"]),
-                "rs_1m": num(r["rs_1m"], RS_PLACES),
-                "rs_3m": num(r["rs_3m"], RS_PLACES),
-                # A dedicated column immediately after rs_3m, not an evidence
-                # slot: it means the same thing on every row of every setup,
-                # including CONFLUENCE. num() leaves an unmeasurable ratio as an
-                # empty cell rather than writing a neutral 1.0.
+                "setup_name": name,
+                "rank_within_setup": rank,
+                "setup_fit_score_0_to_10": num(r["fit"]),
+                "score_now_catalyst_neutral_0_to_10": num(r["total"]),
+                "score_if_trigger_fires_0_to_10": num(r["trigger_total"]),
+                "risk_reward_ratio_vs_1p5_atr_stop": num(r["rr"]),
+                "risk_reward_veto_applied": int(bool(r["vetoed"])),
+                "action_bucket": r["action"],
+                "last_price": num(r["price"]),
+                "trigger_price_that_repairs_setup": num(r["trigger_price"]),
+                "stop_price_1p5_atr_below_last": num(r["stop"]),
+                "relative_strength_1month_vs_nifty50_pct_points":
+                    num(r["rs_1m"], RS_PLACES),
+                "relative_strength_3month_vs_nifty50_pct_points":
+                    num(r["rs_3m"], RS_PLACES),
+                # A dedicated column immediately after the 3-month relative
+                # strength, not an evidence slot: it means the same thing on
+                # every row of every setup, including CONFLUENCE. num() leaves
+                # an unmeasurable ratio as an empty cell rather than writing a
+                # neutral 1.0.
                 #
                 # Subscript, not `.get`: build_result_row sets the key on every
                 # row it builds, so a row without it is a caller bug. `.get`
                 # would write an empty cell for the whole file and read as "the
                 # market has no volume data" instead of raising.
-                "ud_ratio": num(r["ud_ratio"], UD_PLACES),
+                "up_down_volume_ratio_50d": num(r["ud_ratio"], UD_PLACES),
                 # The same block, in the order a reader works through it: the
-                # two remaining raw ratios first, at ud_ratio's own two places
-                # for the same reason, then the two labels derived from them.
-                # Subscript throughout, for the reason above.
-                "ud_weighted": num(r["ud_weighted"], UD_PLACES),
-                "ud_20": num(r["ud_20"], UD_PLACES),
-                "volume_signal": text(r["volume_signal"]),
-                "accumulation_trend": text(r["accumulation_trend"]),
-                "setups_matched": "|".join(matched),
-                "match_count": len(matched),
-                "evidence_1_label": e1_label,
-                "evidence_1_value": e1_value,
-                "evidence_2_label": e2_label,
-                "evidence_2_value": e2_value,
-                "flags": _flags(ev),
+                # two remaining raw ratios first, at the 50-day ratio's own two
+                # places for the same reason, then the two labels derived from
+                # them. Subscript throughout, for the reason above.
+                "close_weighted_volume_ratio_50d": num(r["ud_weighted"],
+                                                       UD_PLACES),
+                "up_down_volume_ratio_20d": num(r["ud_20"], UD_PLACES),
+                "volume_signal_reading": text(r["volume_signal"]),
+                "accumulation_trend_reading": text(r["accumulation_trend"]),
+                "all_setups_matched": "|".join(matched),
+                "setups_matched_count": len(matched),
+                "evidence_1_metric_name": e1_label,
+                "evidence_1_metric_value": e1_value,
+                "evidence_2_metric_name": e2_label,
+                "evidence_2_metric_value": e2_value,
+                "warning_flags": _flags(ev),
             })
     return out
 
