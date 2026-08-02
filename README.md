@@ -49,6 +49,7 @@ python3 ~/.claude/skills/stock_screener/screener.py --setup all --top 15
 python3 ~/.claude/skills/stock_screener/screener.py --setup confluence --top 10
 python3 ~/.claude/skills/stock_screener/screener.py --setup breakout --strict
 python3 ~/.claude/skills/stock_screener/screener.py --setup leader --sector "Financial Services"
+python3 ~/.claude/skills/stock_screener/screener.py --setup all --csv        # ./scans/scan_<date>.csv
 
 python3 ~/.claude/skills/watchlist_analyser/watchlist.py "TITAN,BEL,CHOLAFIN" --detail
 python3 ~/.claude/skills/stock_analyser/analyze.py FEDERALBNK
@@ -127,6 +128,19 @@ candidates; adjudication happens one level down.
 When nothing matches, the output names the condition that rejected the field rather than
 reporting a bare zero. The screener will not pad a list to fill 15 rows.
 
+### The CSV is long format, and `--top` does not touch it
+
+`--csv` writes one row per (symbol, setup) pair: a stock matching three setups gets three
+rows, so a seventh setup added later costs zero new columns. `setups_matched` and
+`match_count` appear on every row, so a COILED row shows the stock is also a LEADER without
+a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"` — because
+a file that needs string-stripping before a column can be sorted is not a data file.
+
+`--top` governs terminal readability only. The file holds every match, and the `rank`
+column preserves the on-screen order, so `rank <= 15` reproduces the printed table exactly.
+`--append` writes the header only when the file is new or empty, and the `mode` column
+records `strict` or `loosened` so two differently-thresholded scans cannot be read as one.
+
 ## Architecture
 
 ```
@@ -136,8 +150,9 @@ stock_screener/
   universe.py     universe parsing, sector filter, NSE constituent refresh
   setups.py       six setup predicates, fit scoring, confluence
   screener.py     parallel scan, ranking, rendering, CLI
+  csv_export.py   long-format CSV export: row building and file I/O
   nifty500.txt    500 symbols with sectors, refreshable from NSE
-  tests/          764 tests
+  tests/          857 tests
 
 stock_analyser/   analyze.py (the scoring engine), levels.py (nine-method S/R)
 watchlist_analyser/  watchlist.py (comparative scoring, relative strength)
@@ -171,7 +186,7 @@ India coverage. They silently rewrite the exchange, return no data, and then rep
 cd stock_screener && python3 -m unittest discover -s tests
 ```
 
-764 tests, no third-party test runner. Beyond the usual coverage, the suite is
+857 tests, no third-party test runner. Beyond the usual coverage, the suite is
 **mutation-verified**: for each assertion, a deliberately wrong implementation was patched
 in and the test confirmed to fail. That practice exists because it caught things ordinary
 testing did not — including a predicate that could never match while all of its tests

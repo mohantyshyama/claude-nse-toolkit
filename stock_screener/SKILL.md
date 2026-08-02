@@ -38,6 +38,9 @@ is fine for a live quote cross-check.
    same to compute (one scoring pass feeds every predicate), so selecting several is free.
    If the user already named a setup, skip the question.
 2. `python3 <skill-dir>/screener.py --setup <names> --top 15` — one call, ~23s for 500 names.
+   Add `--csv` when the user wants the matches in a file — to sort in a spreadsheet, to
+   diff against yesterday's scan, or to keep a record. It costs nothing extra: the scan
+   already ran.
 3. Write up the output using the contract below.
 
 **Do not call `analyze.py` per name afterwards.** The screener's job ends at the shortlist;
@@ -81,6 +84,42 @@ ever see it reported, it is a predicate bug, not a rare event.
 5. **Handoff line** — the paste-ready `watchlist.py` command for the shortlist.
 6. One line noting this is mechanical framework output, not personalised investment advice.
 
+## CSV export
+
+`--csv` writes the same scan to a file. It is an additional output, not a different one:
+the terminal tables and the file come from one scan and one ranking.
+
+```bash
+python3 <skill-dir>/screener.py --setup all --csv               # ./scans/scan_<date>.csv
+python3 <skill-dir>/screener.py --setup coiled --csv picks.csv  # exactly that path
+python3 <skill-dir>/screener.py --setup all --csv log.csv --append   # keep a history
+```
+
+- **Long format: one row per (symbol, setup).** A stock matching three setups gets three
+  rows. Group or filter on the `setup` column; never expect one row per stock.
+- **Every match is written, ignoring `--top`.** `--top` is terminal readability only. The
+  `rank` column preserves the on-screen order, so `rank <= 15` reproduces the table exactly
+  while the file still holds all 210 rows a full scan produces.
+- **`setups_matched` and `match_count` are on every row**, so a COILED row shows the stock
+  is also a LEADER without joining the file to itself.
+- **Values are raw numbers** — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"`; `pos_in_base`
+  as `0.982`, not `98%`. Sortable as they stand. `vetoed` is `0`/`1`, missing values are
+  empty cells, and `flags` carries `volume_light` for a 1.5–2.0x breakout.
+- **CONFLUENCE rows leave the evidence pair blank** — `setups_matched` and `setup_fit`
+  already are its evidence.
+- `--append` writes the header only when the file is new or empty, so a growing log stays
+  one table. `--json` and `--csv` are independent and may be used together; the "wrote N
+  rows" notice goes to stderr so JSON on stdout stays parseable.
+
+The 26 columns, in order: `scan_date`, `last_closed_bar`, `universe`, `mode`, `symbol`,
+`sector`, `setup`, `rank`, `setup_fit`, `score_now`, `score_at_trigger`, `risk_reward`,
+`vetoed`, `action`, `price`, `trigger_price`, `stop`, `rs_1m`, `rs_3m`, `setups_matched`,
+`match_count`, `evidence_1_label`, `evidence_1_value`, `evidence_2_label`,
+`evidence_2_value`, `flags`.
+
+`mode` records `strict` or `loosened`, so two files from different threshold settings can
+never be silently concatenated as one scan.
+
 ### When the user asks for brevity
 
 Brevity drops the per-setup tables down to the top 5 rows each. It never removes a column,
@@ -118,3 +157,6 @@ the key, the FAILED list, or the breadth read.
 | Treating a COILED+BREAKOUT confluence as a bug | It is the VCP breakout — report it, and lead with it |
 | Reporting a BREAKOUT+PULLBACK confluence | Structurally impossible — it is a bug |
 | Padding an empty screen with the "best of a bad lot" | The framework must be able to say "nothing today" |
+| Reading the CSV as one row per stock | It is long format; a three-setup name has three rows |
+| Expecting `--top` to shrink the CSV | It never does — filter on `rank` instead |
+| Appending scans with different `--strict` settings and reading them as one | The `mode` column is there to keep them apart |

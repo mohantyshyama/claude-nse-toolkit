@@ -357,6 +357,8 @@ import datetime as dt  # noqa: E402
 import json            # noqa: E402
 import os              # noqa: E402
 
+import csv_export      # noqa: E402 - row building and file I/O live there
+
 ALL_SETUPS = list(setups.SETUPS) + ["CONFLUENCE"]
 
 
@@ -376,6 +378,14 @@ def parse_args(argv):
                    dest="min_turnover", help="rupees crore, median over 50 days")
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--json", action="store_true")
+    # nargs="?" with a sentinel const, so a bare --csv and --csv PATH arrive
+    # distinguishable: not passed at all is None, bare is the sentinel.
+    p.add_argument("--csv", nargs="?", const=csv_export.DEFAULT_PATH,
+                   default=None, metavar="PATH",
+                   help="write every match to a CSV; bare flag uses "
+                        "./%s/scan_<date>.csv" % csv_export.DEFAULT_DIR)
+    p.add_argument("--append", action="store_true",
+                   help="append to the CSV instead of overwriting it")
     p.add_argument("--refresh-universe", action="store_true", dest="refresh")
     return p.parse_args(argv)
 
@@ -417,6 +427,20 @@ def main(argv=None):
     n_screened = len(rows) - n_illiquid
     closed = rows[0]["o"]["last_closed_bar"]["t"] if rows else "n/a"
     scan_date = dt.date.today().isoformat()
+
+    # Before the --json return: the two output paths are independent and both
+    # may be asked for in one run. by_setup goes in whole -- `top` truncates the
+    # terminal, never the file.
+    if a.csv is not None:
+        path = csv_export.resolve_path(a.csv, scan_date)
+        written = csv_export.write_csv(
+            path,
+            csv_export.build_rows(rows, by_setup, chosen, scan_date, closed,
+                                  csv_export.universe_label(a.universe),
+                                  csv_export.mode_label(a.strict)),
+            append=a.append)
+        # stderr, so --json --csv together still emits parseable JSON on stdout.
+        print("wrote %d rows to %s" % (written, path), file=sys.stderr)
 
     if a.json:
         print(json.dumps({

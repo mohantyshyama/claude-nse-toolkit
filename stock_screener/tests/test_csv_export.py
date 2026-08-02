@@ -1,0 +1,899 @@
+"""CSV export: schema, row building, file semantics and the CLI that drives it.
+
+The file is a machine-readable output, so the assertions are about the exact
+bytes on disk -- column order, raw numbers, blank cells -- not about a dict that
+happens to look right in memory.
+"""
+import csv as csvmod
+import contextlib
+import io
+import os
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import csv_export
+import screener
+import setups
+
+
+EXPECTED_COLUMNS = [
+    "scan_date", "last_closed_bar", "universe", "mode",
+    "symbol", "sector",
+    "setup", "rank", "setup_fit",
+    "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
+    "price", "trigger_price", "stop",
+    "rs_1m", "rs_3m",
+    "setups_matched", "match_count",
+    "evidence_1_label", "evidence_1_value",
+    "evidence_2_label", "evidence_2_value",
+    "flags",
+]
+
+LEADER_EV = {"pct_from_high": 3.5, "rs_1m": 6.2, "rs_3m": 11.4,
+             "full_stack": True}
+COILED_EV = {"contraction": 0.61, "pos_in_base": 0.82}
+BREAKOUT_EV = {"vol_mult": 2.4, "pct_above_base": 1.9, "base_bars": 40,
+               "tightness": 5.0, "volume_light": False}
+
+
+def result(symbol="TCS", **over):
+    """One row in build_result_row's shape -- what rank() sorts and the CSV
+    consumes."""
+    r = {"symbol": symbol, "sector": "Information Technology",
+         "price": 200.0, "fit": 8.1, "evidence": dict(LEADER_EV),
+         "total": 6.2, "trigger_total": 7.0, "trigger_price": 210.0,
+         "stop": 185.0, "rr": 2.4, "rs_1m": 3.0, "rs_3m": 11.0,
+         "vetoed": False, "action": "ALERT", "match_count": 1}
+    r.update(over)
+    return r
+
+
+def scanned(symbol="TCS", matched=("LEADER",), sector="Information Technology"):
+    """A scan() row, trimmed to what build_rows reads off it: the symbol and
+    which setups it matched."""
+    return {"symbol": symbol, "sector": sector,
+            "matched": {n: {"fit": 8.0, "evidence": {}} for n in matched}}
+
+
+def build(scan_rows, by_setup, chosen, scan_date="2026-08-02",
+          last_closed_bar="2026-07-31", universe="nifty500", mode="loosened"):
+    return csv_export.build_rows(scan_rows, by_setup, chosen, scan_date,
+                                 last_closed_bar, universe, mode)
+
+
+def read_back(path):
+    with open(path, newline="", encoding="utf-8") as fh:
+        return list(csvmod.DictReader(fh))
+
+
+def raw_lines(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
+@contextlib.contextmanager
+def tmpdir():
+    d = tempfile.mkdtemp(prefix="csvexport")
+    try:
+        yield d
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def chdir(path):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+
+# --------------------------------------------------------------------- schema
+
+class TestSchema(unittest.TestCase):
+    def test_columns_are_the_agreed_twenty_six_in_order(self):
+        self.assertEqual(csv_export.COLUMNS, EXPECTED_COLUMNS)
+        self.assertEqual(len(csv_export.COLUMNS), 26)
+
+    def test_no_column_name_is_repeated(self):
+        self.assertEqual(len(set(csv_export.COLUMNS)), len(csv_export.COLUMNS))
+
+    def test_a_built_row_carries_exactly_the_schema_keys(self):
+        rows = build([scanned()], {"LEADER": [result()]}, ["LEADER"])
+        self.assertEqual(sorted(rows[0]), sorted(csv_export.COLUMNS))
+
+    def test_the_written_header_is_the_column_order(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, build([scanned()],
+                                             {"LEADER": [result()]}, ["LEADER"]))
+            self.assertEqual(raw_lines(path)[0], ",".join(EXPECTED_COLUMNS))
+
+    def test_every_setup_the_screener_can_emit_has_an_evidence_entry(self):
+        """A seventh setup added to setups.SETUPS must not KeyError the export."""
+        self.assertEqual(sorted(csv_export.EVIDENCE),
+                         sorted(list(setups.SETUPS) + ["CONFLUENCE"]))
+
+    def test_evidence_pairs_are_two_per_setup_except_confluence(self):
+        for name, pairs in csv_export.EVIDENCE.items():
+            self.assertEqual(len(pairs), 0 if name == "CONFLUENCE" else 2, name)
+
+
+# ------------------------------------------------------------------- num()
+
+class TestNum(unittest.TestCase):
+    def test_none_becomes_an_empty_string_not_the_word_none(self):
+        self.assertEqual(csv_export.num(None), "")
+
+    def test_nan_becomes_an_empty_string_too(self):
+        self.assertEqual(csv_export.num(float("nan")), "")
+
+    def test_true_becomes_one_and_is_no_longer_a_bool(self):
+        got = csv_export.num(True)
+        self.assertEqual(got, 1)
+        self.assertNotIsInstance(got, bool)
+
+    def test_false_becomes_zero_rather_than_being_dropped(self):
+        got = csv_export.num(False)
+        self.assertEqual(got, 0)
+        self.assertNotIsInstance(got, bool)
+
+    def test_an_int_passes_through_untouched(self):
+        self.assertEqual(csv_export.num(1234567), 1234567)
+
+    def test_a_float_rounds_to_the_places_asked_for(self):
+        self.assertEqual(csv_export.num(0.98172, 3), 0.982)
+        self.assertEqual(csv_export.num(0.98172, 2), 0.98)
+        self.assertEqual(csv_export.num(0.98172, 1), 1.0)
+
+    def test_the_default_rounding_is_two_places(self):
+        self.assertEqual(csv_export.num(6.2149), 6.21)
+
+    def test_a_numeric_string_is_still_rounded_not_passed_through(self):
+        self.assertEqual(csv_export.num("6.2149"), 6.21)
+
+    def test_zero_survives_as_zero_rather_than_reading_as_missing(self):
+        self.assertEqual(csv_export.num(0.0), 0.0)
+        self.assertNotEqual(csv_export.num(0.0), "")
+
+
+class TestLabels(unittest.TestCase):
+    def test_universe_label_drops_the_directory_and_the_extension(self):
+        self.assertEqual(csv_export.universe_label("/a/b/nifty500.txt"),
+                         "nifty500")
+
+    def test_universe_label_leaves_a_bare_name_alone(self):
+        self.assertEqual(csv_export.universe_label("nifty500"), "nifty500")
+
+    def test_mode_label_has_both_arms(self):
+        self.assertEqual(csv_export.mode_label(True), "strict")
+        self.assertEqual(csv_export.mode_label(False), "loosened")
+
+    def test_mode_label_matches_the_words_the_header_prints(self):
+        """The file and the terminal must not disagree about the thresholds."""
+        for strict in (True, False):
+            header = screener.render_header("2026-08-02", "2026-07-31", "u.txt",
+                                            10, strict, 10, [], 0, {})
+            self.assertIn(csv_export.mode_label(strict), header.split("\n")[0])
+
+
+# ---------------------------------------------------------------- build_rows
+
+class TestBuildRows(unittest.TestCase):
+    def test_scan_metadata_is_stamped_on_every_row(self):
+        rows = build([scanned()], {"LEADER": [result()]}, ["LEADER"],
+                     scan_date="2026-08-02", last_closed_bar="2026-07-31",
+                     universe="nifty500", mode="strict")
+        self.assertEqual(rows[0]["scan_date"], "2026-08-02")
+        self.assertEqual(rows[0]["last_closed_bar"], "2026-07-31")
+        self.assertEqual(rows[0]["universe"], "nifty500")
+        self.assertEqual(rows[0]["mode"], "strict")
+
+    def test_one_row_per_symbol_setup_pair(self):
+        scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
+        by_setup = {"COILED": [result("TCS", evidence=dict(COILED_EV))],
+                    "LEADER": [result("TCS")],
+                    "CONFLUENCE": [result("TCS", evidence={"matched": ["COILED", "LEADER"],
+                                                           "count": 2,
+                                                           "label": "COILED+LEADER",
+                                                           "mean_fit": 8.0})]}
+        rows = build(scan_rows, by_setup, ["COILED", "LEADER", "CONFLUENCE"])
+        self.assertEqual([r["setup"] for r in rows],
+                         ["COILED", "LEADER", "CONFLUENCE"])
+        self.assertEqual({r["symbol"] for r in rows}, {"TCS"})
+
+    def test_setups_matched_is_identical_on_every_row_of_that_symbol(self):
+        scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
+        by_setup = {"COILED": [result("TCS", evidence=dict(COILED_EV))],
+                    "LEADER": [result("TCS")]}
+        rows = build(scan_rows, by_setup, ["COILED", "LEADER"])
+        for r in rows:
+            self.assertEqual(r["setups_matched"], "COILED|LEADER")
+            self.assertEqual(r["match_count"], 2)
+
+    def test_setups_matched_reports_setups_this_export_did_not_ask_for(self):
+        """--setup coiled still says the name is also a LEADER: the question is
+        about the stock, not about the slice being exported."""
+        rows = build([scanned("TCS", ("COILED", "LEADER"))],
+                     {"COILED": [result("TCS", evidence=dict(COILED_EV))]},
+                     ["COILED"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["setups_matched"], "COILED|LEADER")
+        self.assertEqual(rows[0]["match_count"], 2)
+
+    def test_setups_matched_is_life_cycle_ordered_not_alphabetical(self):
+        rows = build([scanned("TCS", ("TURN", "COILED", "BREAKOUT"))],
+                     {"LEADER": [result("TCS")]}, ["LEADER"])
+        self.assertEqual(rows[0]["setups_matched"], "COILED|BREAKOUT|TURN")
+
+    def test_confluence_is_not_counted_as_a_matched_setup(self):
+        scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
+        scan_rows[0]["matched"]["CONFLUENCE"] = {"fit": 8.0, "evidence": {}}
+        rows = build(scan_rows, {"LEADER": [result("TCS")]}, ["LEADER"])
+        self.assertEqual(rows[0]["setups_matched"], "COILED|LEADER")
+        self.assertEqual(rows[0]["match_count"], 2)
+
+    def test_a_single_setup_name_still_gets_the_pair_of_columns(self):
+        rows = build([scanned("TCS", ("LEADER",))],
+                     {"LEADER": [result("TCS")]}, ["LEADER"])
+        self.assertEqual(rows[0]["setups_matched"], "LEADER")
+        self.assertEqual(rows[0]["match_count"], 1)
+
+    def test_a_row_whose_symbol_never_scanned_degrades_instead_of_crashing(self):
+        rows = build([scanned("TCS")], {"LEADER": [result("GHOST")]}, ["LEADER"])
+        self.assertEqual(rows[0]["setups_matched"], "")
+        self.assertEqual(rows[0]["match_count"], 0)
+
+    def test_rank_is_one_based_and_follows_the_given_order(self):
+        by_setup = {"LEADER": [result("A"), result("B"), result("C")]}
+        rows = build([scanned("A"), scanned("B"), scanned("C")],
+                     by_setup, ["LEADER"])
+        self.assertEqual([(r["symbol"], r["rank"]) for r in rows],
+                         [("A", 1), ("B", 2), ("C", 3)])
+
+    def test_rank_restarts_at_one_for_each_setup(self):
+        by_setup = {"COILED": [result("A", evidence=dict(COILED_EV)),
+                               result("B", evidence=dict(COILED_EV))],
+                    "LEADER": [result("C")]}
+        rows = build([scanned("A"), scanned("B"), scanned("C")],
+                     by_setup, ["COILED", "LEADER"])
+        self.assertEqual([(r["setup"], r["rank"]) for r in rows],
+                         [("COILED", 1), ("COILED", 2), ("LEADER", 1)])
+
+    def test_setups_are_emitted_in_the_chosen_order(self):
+        by_setup = {"COILED": [result("A", evidence=dict(COILED_EV))],
+                    "LEADER": [result("B")]}
+        rows = build([scanned("A"), scanned("B")], by_setup,
+                     ["LEADER", "COILED"])
+        self.assertEqual([r["setup"] for r in rows], ["LEADER", "COILED"])
+
+    def test_a_chosen_setup_with_no_matches_contributes_no_rows(self):
+        rows = build([scanned("A")], {"LEADER": [result("A")], "TURN": []},
+                     ["LEADER", "TURN"])
+        self.assertEqual([r["setup"] for r in rows], ["LEADER"])
+
+    def test_a_chosen_setup_absent_from_the_map_contributes_no_rows(self):
+        rows = build([scanned("A")], {"LEADER": [result("A")]},
+                     ["LEADER", "PULLBACK"])
+        self.assertEqual([r["setup"] for r in rows], ["LEADER"])
+
+
+class TestEvidenceColumns(unittest.TestCase):
+    def _row(self, setup, evidence, symbol="TCS"):
+        return build([scanned(symbol, (setup,) if setup != "CONFLUENCE"
+                              else ("COILED", "LEADER"))],
+                     {setup: [result(symbol, evidence=evidence)]}, [setup])[0]
+
+    def test_coiled_emits_contraction_and_position_in_base(self):
+        r = self._row("COILED", {"contraction": 0.61, "pos_in_base": 0.98172})
+        self.assertEqual(r["evidence_1_label"], "contraction")
+        self.assertEqual(r["evidence_1_value"], 0.61)
+        self.assertEqual(r["evidence_2_label"], "pos_in_base")
+        self.assertEqual(r["evidence_2_value"], 0.982)
+
+    def test_position_in_base_stays_a_fraction_rather_than_a_percent_string(self):
+        r = self._row("COILED", {"contraction": 0.61, "pos_in_base": 0.982})
+        self.assertNotIsInstance(r["evidence_2_value"], str)
+        self.assertLess(r["evidence_2_value"], 1.0)
+
+    def test_breakout_emits_volume_multiple_and_extension_as_bare_numbers(self):
+        r = self._row("BREAKOUT", {"vol_mult": 4.1064, "pct_above_base": 6.2171,
+                                   "volume_light": False})
+        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+                         ("vol_mult", 4.106))
+        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+                         ("pct_above_base", 6.217))
+
+    def test_leader_emits_stack_completeness_not_a_second_copy_of_rs_1m(self):
+        """rs_1m already has a column; two columns claiming the same number at
+        two roundings is the bug this replaces. full_stack is a real input to
+        fit_leader and appears nowhere else in the row."""
+        r = self._row("LEADER", {"pct_from_high": 3.4567, "rs_1m": 6.2178,
+                                 "full_stack": True})
+        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+                         ("pct_from_high", 3.457))
+        self.assertEqual(r["evidence_2_label"], "ma_stack_full")
+        self.assertEqual(r["evidence_2_value"], 1)
+        self.assertNotIn("rs_1m", (r["evidence_1_label"], r["evidence_2_label"]))
+
+    def test_an_incomplete_stack_is_zero_rather_than_blank(self):
+        r = self._row("LEADER", {"pct_from_high": 3.4, "full_stack": False})
+        self.assertEqual(r["evidence_2_value"], 0)
+
+    def test_leader_evidence_keys_exist_on_the_real_predicates_output(self):
+        """Pins the export to match_leader's actual evidence dict, so renaming
+        full_stack there cannot silently blank a column here."""
+        import inspect
+        src = inspect.getsource(setups.match_leader)
+        self.assertIn('"full_stack"', src)
+        self.assertIn('"pct_from_high"', src)
+
+    def test_pullback_emits_distance_to_average_and_rsi_at_three_places(self):
+        r = self._row("PULLBACK", {"dist_to_ma_pct": 1.23456, "rsi": 52.9579})
+        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+                         ("dist_to_ma_pct", 1.235))
+        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+                         ("rsi", 52.958))
+
+    def test_turn_emits_bars_since_cross_and_the_macd_histogram(self):
+        r = self._row("TURN", {"bars_since_cross": 12, "macd_hist": 1.23456})
+        self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
+                         ("bars_since_cross", 12))
+        self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
+                         ("macd_hist", 1.235))
+
+    def test_confluence_leaves_both_evidence_pairs_blank(self):
+        """Its evidence is setups_matched plus setup_fit, already in the row."""
+        r = self._row("CONFLUENCE", {"matched": ["COILED", "LEADER"],
+                                     "count": 2, "label": "COILED+LEADER",
+                                     "mean_fit": 8.0})
+        self.assertEqual(r["evidence_1_label"], "")
+        self.assertEqual(r["evidence_1_value"], "")
+        self.assertEqual(r["evidence_2_label"], "")
+        self.assertEqual(r["evidence_2_value"], "")
+        self.assertEqual(r["setups_matched"], "COILED|LEADER")
+
+    def test_a_missing_evidence_key_blanks_the_value_but_keeps_the_label(self):
+        r = self._row("COILED", {"contraction": 0.61})
+        self.assertEqual(r["evidence_2_label"], "pos_in_base")
+        self.assertEqual(r["evidence_2_value"], "")
+
+
+class TestFlags(unittest.TestCase):
+    def _flags(self, evidence, setup="BREAKOUT"):
+        return build([scanned("TCS", (setup,))],
+                     {setup: [result("TCS", evidence=evidence)]},
+                     [setup])[0]["flags"]
+
+    def test_a_light_volume_breakout_carries_the_flag(self):
+        self.assertEqual(self._flags({"vol_mult": 1.7, "pct_above_base": 2.0,
+                                      "volume_light": True}),
+                         "volume_light")
+
+    def test_a_confirmed_breakout_carries_no_flag(self):
+        self.assertEqual(self._flags({"vol_mult": 2.6, "pct_above_base": 2.0,
+                                      "volume_light": False}),
+                         "")
+
+    def test_a_setup_that_never_measures_volume_carries_no_flag(self):
+        self.assertEqual(self._flags(dict(LEADER_EV), setup="LEADER"), "")
+
+    def test_the_flag_survives_all_the_way_into_the_file(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, build(
+                [scanned("TCS", ("BREAKOUT",))],
+                {"BREAKOUT": [result("TCS", evidence={"vol_mult": 1.7,
+                                                      "pct_above_base": 2.0,
+                                                      "volume_light": True})]},
+                ["BREAKOUT"]))
+            self.assertEqual(read_back(path)[0]["flags"], "volume_light")
+
+    def test_the_flag_matches_the_threshold_stock_analyser_defines(self):
+        """1.5-2.0x is the near-miss band; 2x is a confirmed trigger."""
+        self.assertEqual(setups.CONFIRMED_VOL_MULT, 2.0)
+
+
+class TestValueTypes(unittest.TestCase):
+    def test_scores_round_to_two_places_and_relative_strength_to_one(self):
+        rows = build([scanned()],
+                     {"LEADER": [result(fit=8.1251, total=6.2149,
+                                        trigger_total=7.1749, rr=2.4449,
+                                        rs_1m=6.2178, rs_3m=-3.26)]},
+                     ["LEADER"])
+        r = rows[0]
+        self.assertEqual(r["setup_fit"], 8.13)
+        self.assertEqual(r["score_now"], 6.21)
+        self.assertEqual(r["score_at_trigger"], 7.17)
+        self.assertEqual(r["risk_reward"], 2.44)
+        self.assertEqual(r["rs_1m"], 6.2)
+        self.assertEqual(r["rs_3m"], -3.3)
+
+    def test_prices_round_to_two_places(self):
+        rows = build([scanned()],
+                     {"LEADER": [result(price=1234.5678, trigger_price=1240.1234,
+                                        stop=1180.9876)]}, ["LEADER"])
+        self.assertEqual(rows[0]["price"], 1234.57)
+        self.assertEqual(rows[0]["trigger_price"], 1240.12)
+        self.assertEqual(rows[0]["stop"], 1180.99)
+
+    def test_none_values_become_empty_strings_across_the_row(self):
+        rows = build([scanned()],
+                     {"LEADER": [result(trigger_total=None, trigger_price=None,
+                                        stop=None, rr=None, rs_1m=None,
+                                        rs_3m=None)]}, ["LEADER"])
+        for col in ("score_at_trigger", "trigger_price", "stop", "risk_reward",
+                    "rs_1m", "rs_3m"):
+            self.assertEqual(rows[0][col], "", col)
+
+    def test_none_never_reaches_the_file_as_the_word_none(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, build(
+                [scanned()], {"LEADER": [result(trigger_total=None, stop=None,
+                                                rr=None, rs_1m=None)]},
+                ["LEADER"]))
+            body = raw_lines(path)[1]
+            self.assertNotIn("None", body)
+            self.assertNotIn("nan", body)
+
+    def test_vetoed_is_one_or_zero_not_a_boolean_word(self):
+        clean = build([scanned()], {"LEADER": [result(vetoed=False)]},
+                      ["LEADER"])[0]
+        veto = build([scanned()], {"LEADER": [result(vetoed=True)]},
+                     ["LEADER"])[0]
+        self.assertEqual(clean["vetoed"], 0)
+        self.assertEqual(veto["vetoed"], 1)
+        self.assertNotIsInstance(veto["vetoed"], bool)
+
+    def test_the_action_word_is_carried_through_verbatim(self):
+        rows = build([scanned()], {"LEADER": [result(action="BUY HALF")]},
+                     ["LEADER"])
+        self.assertEqual(rows[0]["action"], "BUY HALF")
+
+    def test_no_numeric_cell_in_the_file_carries_a_unit_symbol(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, build(
+                [scanned("TCS", ("BREAKOUT",))],
+                {"BREAKOUT": [result("TCS", evidence=dict(BREAKOUT_EV))]},
+                ["BREAKOUT"]))
+            row = read_back(path)[0]
+            for col in ("setup_fit", "score_now", "risk_reward", "price",
+                        "rs_1m", "rs_3m", "evidence_1_value",
+                        "evidence_2_value"):
+                self.assertNotIn("%", row[col], col)
+                self.assertNotIn("x", row[col], col)
+                float(row[col])          # sortable without any stripping
+
+
+# ------------------------------------------------------------------ write_csv
+
+class TestWriteCsv(unittest.TestCase):
+    def _rows(self, *symbols):
+        return build([scanned(s) for s in symbols],
+                     {"LEADER": [result(s) for s in symbols]}, ["LEADER"])
+
+    def test_it_returns_the_number_of_data_rows_written(self):
+        with tmpdir() as d:
+            n = csv_export.write_csv(os.path.join(d, "out.csv"),
+                                     self._rows("A", "B"))
+            self.assertEqual(n, 2)
+
+    def test_a_missing_parent_directory_is_created(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "scans", "out.csv")
+            csv_export.write_csv(path, self._rows("A"))
+            self.assertTrue(os.path.exists(path))
+
+    def test_a_bare_filename_with_no_directory_part_still_writes(self):
+        with tmpdir() as d, chdir(d):
+            csv_export.write_csv("out.csv", self._rows("A"))
+            self.assertTrue(os.path.exists(os.path.join(d, "out.csv")))
+
+    def test_overwrite_replaces_the_previous_scan_entirely(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, self._rows("A", "B"))
+            csv_export.write_csv(path, self._rows("C"))
+            rows = read_back(path)
+            self.assertEqual([r["symbol"] for r in rows], ["C"])
+            self.assertEqual(sum(1 for l in raw_lines(path)
+                                 if l.startswith("scan_date,")), 1)
+
+    def test_append_to_a_new_file_writes_the_header(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, self._rows("A"), append=True)
+            self.assertEqual(raw_lines(path)[0], ",".join(EXPECTED_COLUMNS))
+
+    def test_append_to_an_existing_but_empty_file_writes_the_header(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            open(path, "w").close()
+            csv_export.write_csv(path, self._rows("A"), append=True)
+            self.assertEqual(raw_lines(path)[0], ",".join(EXPECTED_COLUMNS))
+
+    def test_append_to_a_populated_file_does_not_repeat_the_header(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, self._rows("A", "B"))
+            csv_export.write_csv(path, self._rows("C"), append=True)
+            lines = raw_lines(path)
+            self.assertEqual(sum(1 for l in lines
+                                 if l.startswith("scan_date,")), 1)
+            self.assertEqual([r["symbol"] for r in read_back(path)],
+                             ["A", "B", "C"])
+
+    def test_appending_twice_still_leaves_exactly_one_header(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, self._rows("A"), append=True)
+            csv_export.write_csv(path, self._rows("B"), append=True)
+            csv_export.write_csv(path, self._rows("C"), append=True)
+            self.assertEqual(sum(1 for l in raw_lines(path)
+                                 if l.startswith("scan_date,")), 1)
+            self.assertEqual(len(read_back(path)), 3)
+
+    def test_appending_zero_rows_to_a_new_file_still_writes_the_header(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            self.assertEqual(csv_export.write_csv(path, [], append=True), 0)
+            self.assertEqual(raw_lines(path), [",".join(EXPECTED_COLUMNS)])
+
+    def test_a_sector_containing_a_comma_is_quoted_not_split(self):
+        rows = build([scanned("TCS")],
+                     {"LEADER": [result("TCS", sector="Oil, Gas & Fuels")]},
+                     ["LEADER"])
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, rows)
+            back = read_back(path)
+            self.assertEqual(len(back), 1)
+            self.assertEqual(back[0]["sector"], "Oil, Gas & Fuels")
+
+
+class TestResolvePath(unittest.TestCase):
+    def test_the_bare_flag_resolves_to_the_dated_default(self):
+        self.assertEqual(
+            csv_export.resolve_path(csv_export.DEFAULT_PATH, "2026-08-02",
+                                    base="."),
+            os.path.join(".", "scans", "scan_2026-08-02.csv"))
+
+    def test_the_default_path_is_dated_by_the_scan_not_by_a_constant(self):
+        a = csv_export.default_path("2026-08-02")
+        b = csv_export.default_path("2026-08-03")
+        self.assertNotEqual(a, b)
+        self.assertIn("2026-08-03", b)
+
+    def test_an_explicit_path_is_returned_exactly(self):
+        self.assertEqual(csv_export.resolve_path("/tmp/x/y.csv", "2026-08-02"),
+                         "/tmp/x/y.csv")
+
+    def test_a_path_that_merely_looks_like_the_sentinel_is_still_a_path(self):
+        """The sentinel is an object, so no filename can collide with it."""
+        for text in ("__default__", "<default csv path>", "DEFAULT_PATH"):
+            self.assertEqual(csv_export.resolve_path(text, "2026-08-02"), text)
+
+    def test_the_default_lands_under_a_scans_directory(self):
+        self.assertEqual(csv_export.DEFAULT_DIR, "scans")
+        self.assertIn(os.sep + "scans" + os.sep,
+                      csv_export.default_path("2026-08-02"))
+
+
+# ------------------------------------------------------------------------ CLI
+
+class TestCsvArgs(unittest.TestCase):
+    def test_no_csv_flag_means_no_file(self):
+        self.assertIsNone(screener.parse_args([]).csv)
+
+    def test_a_bare_csv_flag_yields_the_sentinel(self):
+        self.assertIs(screener.parse_args(["--csv"]).csv,
+                      csv_export.DEFAULT_PATH)
+
+    def test_csv_with_a_path_yields_that_path(self):
+        self.assertEqual(screener.parse_args(["--csv", "/tmp/o.csv"]).csv,
+                         "/tmp/o.csv")
+
+    def test_a_bare_csv_flag_does_not_swallow_the_next_flag(self):
+        a = screener.parse_args(["--csv", "--strict"])
+        self.assertIs(a.csv, csv_export.DEFAULT_PATH)
+        self.assertTrue(a.strict)
+
+    def test_append_defaults_off_and_is_a_flag(self):
+        self.assertFalse(screener.parse_args([]).append)
+        self.assertTrue(screener.parse_args(["--append"]).append)
+
+    def test_csv_composes_with_every_other_scan_flag(self):
+        a = screener.parse_args(["--csv", "out.csv", "--append", "--setup",
+                                 "coiled,leader", "--sector", "Banks",
+                                 "--strict", "--min-turnover", "8.5",
+                                 "--top", "3", "--json"])
+        self.assertEqual(a.csv, "out.csv")
+        self.assertTrue(a.append)
+        self.assertTrue(a.strict)
+        self.assertTrue(a.json)
+        self.assertEqual(a.setup, "coiled,leader")
+        self.assertEqual(a.sector, "Banks")
+        self.assertAlmostEqual(a.min_turnover, 8.5)
+        self.assertEqual(a.top, 3)
+
+    def test_the_help_text_names_the_default_location(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit):
+            screener.parse_args(["--help"])
+        self.assertIn("--csv", buf.getvalue())
+        self.assertIn("scans", buf.getvalue())
+
+
+# ------------------------------------------------------- main(), offline rig
+
+def scan_row(symbol, sector="Information Technology", total=6.2,
+             verdict="HALF SIZE", matched=None, rs=(3.0, 11.0), price=200.0,
+             rr=2.4, atr=10.0):
+    """A scan() row complete enough for build_result_row and the renderers."""
+    if matched is None:
+        matched = {"LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)}}
+    return {"symbol": symbol, "sector": sector, "illiquid": False, "diag": {},
+            "rs": {"1m": rs[0], "3m": rs[1]}, "matched": matched,
+            "o": {"price": price, "score": {"total": total, "verdict": verdict},
+                  "entry_gate": {"rr_at_current_price": rr},
+                  "atr": {"daily": atr},
+                  "last_closed_bar": {"t": "2026-07-31"}}}
+
+
+@contextlib.contextmanager
+def stub_scan(rows, pairs=None):
+    """Runs main() end to end without the network: universe, scan and the
+    trigger projection are replaced; ranking, rendering and the export are the
+    real ones."""
+    saved = (screener.load_universe, screener.scan, screener.W.score_at_trigger)
+    screener.load_universe = lambda path, sectors=None: (
+        pairs if pairs is not None else [(r["symbol"], r["sector"]) for r in rows])
+    screener.scan = lambda *a, **k: (rows, [])
+    screener.W.score_at_trigger = lambda o: None
+    try:
+        yield
+    finally:
+        (screener.load_universe, screener.scan,
+         screener.W.score_at_trigger) = saved
+
+
+def run_main(argv, rows):
+    out, err = io.StringIO(), io.StringIO()
+    with stub_scan(rows), redirect_stdout(out), redirect_stderr(err):
+        rc = screener.main(argv)
+    return rc, out.getvalue(), err.getvalue()
+
+
+class TestMainCsv(unittest.TestCase):
+    def _rows(self, n=4):
+        return [scan_row("SYM%d" % i, total=9.0 - i) for i in range(n)]
+
+    def test_no_csv_flag_writes_no_file(self):
+        with tmpdir() as d, chdir(d):
+            rc, _, err = run_main(["--setup", "leader"], self._rows(2))
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists("scans"))
+            self.assertNotIn("wrote", err)
+
+    def test_a_bare_csv_flag_writes_the_dated_default_under_scans(self):
+        import datetime as dt
+        with tmpdir() as d, chdir(d):
+            rc, _, err = run_main(["--setup", "leader", "--csv"], self._rows(2))
+            self.assertEqual(rc, 0)
+            path = os.path.join(".", "scans",
+                                "scan_%s.csv" % dt.date.today().isoformat())
+            self.assertTrue(os.path.exists(path), err)
+            self.assertEqual(len(read_back(path)), 2)
+
+    def test_csv_with_a_path_writes_exactly_there(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "sub", "mine.csv")
+            rc, _, err = run_main(["--setup", "leader", "--csv", path],
+                                  self._rows(2))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(os.path.join(d, "scans")))
+            self.assertIn(path, err)
+
+    def test_top_truncates_the_terminal_but_never_the_file(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            rc, out, _ = run_main(["--setup", "leader", "--top", "2",
+                                   "--csv", path], self._rows(4))
+            self.assertEqual(rc, 0)
+            self.assertIn("showing top 2 of 4", out)
+            rows = read_back(path)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual([r["rank"] for r in rows], ["1", "2", "3", "4"])
+
+    def test_rank_reproduces_the_terminal_order_exactly(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            _, out, _ = run_main(["--setup", "leader", "--top", "2",
+                                  "--csv", path], self._rows(4))
+            shown = [l.split("|")[2].strip() for l in out.split("\n")
+                     if l.startswith("| ") and "SYM" in l]
+            rows = read_back(path)
+            self.assertEqual(shown, ["SYM0", "SYM1"])
+            self.assertEqual([r["symbol"] for r in rows
+                              if int(r["rank"]) <= 2], shown)
+            self.assertEqual([r["symbol"] for r in rows],
+                             ["SYM0", "SYM1", "SYM2", "SYM3"])
+
+    def test_setup_filter_reaches_the_file(self):
+        rows = [scan_row("A", matched={
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)}})]
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "coiled", "--csv", path], rows)
+            back = read_back(path)
+            self.assertEqual([r["setup"] for r in back], ["COILED"])
+            self.assertEqual(back[0]["setups_matched"], "COILED|LEADER")
+
+    def test_strict_is_recorded_in_the_mode_column(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--strict", "--csv", path],
+                     self._rows(1))
+            self.assertEqual(read_back(path)[0]["mode"], "strict")
+
+    def test_a_loosened_scan_says_so_in_the_mode_column(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--csv", path], self._rows(1))
+            self.assertEqual(read_back(path)[0]["mode"], "loosened")
+
+    def test_the_universe_column_is_the_universe_not_the_filename(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--universe", "/x/y/nifty500.txt",
+                      "--csv", path], self._rows(1))
+            self.assertEqual(read_back(path)[0]["universe"], "nifty500")
+
+    def test_csv_and_json_are_independent_and_compose(self):
+        import json
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            rc, out, _ = run_main(["--setup", "leader", "--json", "--csv", path],
+                                  self._rows(2))
+            self.assertEqual(rc, 0)
+            payload = json.loads(out)          # stdout stays parseable
+            self.assertIn("LEADER", payload["setups"])
+            self.assertEqual(len(read_back(path)), 2)
+
+    def test_the_notice_goes_to_stderr_with_the_row_count(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            _, out, err = run_main(["--setup", "leader", "--json",
+                                    "--csv", path], self._rows(3))
+            self.assertIn("wrote 3 rows", err)
+            self.assertNotIn("wrote 3 rows", out)
+
+    def test_append_across_two_runs_keeps_one_header_and_both_scans(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--csv", path, "--append"],
+                     self._rows(2))
+            run_main(["--setup", "leader", "--csv", path, "--append"],
+                     [scan_row("LATER")])
+            lines = raw_lines(path)
+            self.assertEqual(sum(1 for l in lines
+                                 if l.startswith("scan_date,")), 1)
+            self.assertEqual([r["symbol"] for r in read_back(path)],
+                             ["SYM0", "SYM1", "LATER"])
+
+    def test_without_append_the_second_run_replaces_the_first(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--csv", path], self._rows(2))
+            run_main(["--setup", "leader", "--csv", path], [scan_row("LATER")])
+            self.assertEqual([r["symbol"] for r in read_back(path)], ["LATER"])
+
+    def test_an_empty_screen_still_writes_a_headed_file(self):
+        """A scan that matched nothing is a finding, and the file has to say so
+        in a shape a reader can still parse."""
+        rows = [scan_row("A", matched={})]
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            rc, _, _ = run_main(["--setup", "leader", "--csv", path], rows)
+            self.assertEqual(rc, 0)
+            self.assertEqual(raw_lines(path), [",".join(EXPECTED_COLUMNS)])
+
+    def test_confluence_rows_reach_the_file_with_blank_evidence(self):
+        rows = [scan_row("A", matched={
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)},
+            "CONFLUENCE": {"fit": 7.5,
+                           "evidence": {"matched": ["COILED", "LEADER"],
+                                        "count": 2,
+                                        "label": "COILED+LEADER",
+                                        "mean_fit": 7.5}}})]
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "all", "--csv", path], rows)
+            back = {r["setup"]: r for r in read_back(path)}
+            self.assertEqual(sorted(back), ["COILED", "CONFLUENCE", "LEADER"])
+            conf = back["CONFLUENCE"]
+            self.assertEqual(conf["evidence_1_label"], "")
+            self.assertEqual(conf["evidence_2_value"], "")
+            self.assertEqual(conf["setups_matched"], "COILED|LEADER")
+            self.assertEqual(conf["match_count"], "2")
+            self.assertEqual(back["LEADER"]["setups_matched"], "COILED|LEADER")
+
+    def test_the_file_carries_the_scans_own_last_closed_bar(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--csv", path], self._rows(1))
+            self.assertEqual(read_back(path)[0]["last_closed_bar"], "2026-07-31")
+
+
+class TestLiveSmoke(unittest.TestCase):
+    """One live scan of the real universe, cross-checked against the scan's own
+    header. Everything else above is offline.
+
+    It runs on the FULL universe deliberately. A three-name universe matched
+    nothing on the day this was written, so the file had a header and no rows --
+    every per-row assertion passed over an empty list and the test proved
+    nothing. The header's match counts are the independent number to check the
+    file against.
+    """
+
+    def test_a_real_scan_writes_every_match_it_reported(self):
+        import re
+        with tmpdir() as d:
+            path = os.path.join(d, "live.csv")
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+                rc = screener.main(["--setup", "all", "--top", "5",
+                                    "--csv", path])
+            self.assertEqual(rc, 0)
+            line = [l for l in buf.getvalue().split("\n")
+                    if l.startswith("matches ")][0]
+            counts = {k: int(v) for k, v in re.findall(r"(\w+) (\d+)", line)}
+
+            with open(path, newline="", encoding="utf-8") as fh:
+                reader = csvmod.DictReader(fh)
+                self.assertEqual(reader.fieldnames, EXPECTED_COLUMNS)
+                rows = list(reader)
+
+            self.assertTrue(sum(counts.values()) > 0,
+                            "nothing matched anywhere in the universe -- this "
+                            "smoke test cannot say anything today")
+            self.assertEqual(len(rows), sum(counts.values()))
+            for name, n in counts.items():
+                ranks = [int(r["rank"]) for r in rows if r["setup"] == name]
+                # Contiguous 1..n: the file holds every match, not the top 5.
+                self.assertEqual(ranks, list(range(1, n + 1)), name)
+
+            all_setups = list(setups.SETUPS) + ["CONFLUENCE"]
+            for r in rows:
+                self.assertIn(r["setup"], all_setups)
+                self.assertIn(r["vetoed"], ("0", "1"))
+                self.assertEqual(r["mode"], "loosened")
+                self.assertEqual(r["universe"], "nifty500")
+                self.assertTrue(r["symbol"] and r["sector"])
+                float(r["score_now"])
+                float(r["setup_fit"])
+                self.assertNotIn("None", list(r.values()))
+                self.assertNotIn("nan", list(r.values()))
+                matched = [m for m in r["setups_matched"].split("|") if m]
+                self.assertEqual(int(r["match_count"]), len(matched))
+                if r["setup"] != "CONFLUENCE":
+                    self.assertIn(r["setup"], matched)
+                    self.assertTrue(r["evidence_1_label"])
+                else:
+                    self.assertEqual(r["evidence_1_label"], "")
+                    self.assertGreaterEqual(int(r["match_count"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
