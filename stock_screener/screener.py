@@ -130,6 +130,21 @@ def build_result_row(row, setup):
             "rr": rr, "rs_1m": row["rs"]["1m"], "rs_3m": row["rs"]["3m"],
             "vetoed": rr is not None and rr < 1.5,
             "action": act,
+            # A property of the SYMBOL, like Risk:Reward and relative strength,
+            # not of the setup it matched -- so it sits on the row rather than
+            # in a per-setup evidence slot, and every table including CONFLUENCE
+            # prints the same column.
+            #
+            # `hit["ud_ratio"]`, not `hit["evidence"].get(...)`: setups.evaluate
+            # puts the ratio at the top level of every matched entry beside
+            # `fit` and `evidence`, CONFLUENCE included, precisely so one key
+            # reads the same on every setup. A `.get` with a default would turn
+            # a producer that stopped emitting it into a table of dashes -- a
+            # silent claim that the market has no volume data. None still
+            # survives as None: a name with no down-volume in 50 sessions has no
+            # ratio, and the column must print a dash rather than invent a
+            # neutral 1.00.
+            "ud_ratio": hit["ud_ratio"],
             "match_count": hit["evidence"].get("count", 1),
             "o": o}
 
@@ -184,9 +199,18 @@ EVIDENCE_COLUMNS = {
                    ("Mean Setup Fit", lambda r: _n(r["evidence"]["mean_fit"]))],
 }
 
+# "Up/Down Volume Ratio" is a BASE column, not an evidence slot: it is a
+# universal metric like Risk:Reward -- one number meaning one thing for every
+# name -- rather than one of the two setup-specific facts EVIDENCE_COLUMNS
+# carries. Every table prints it, CONFLUENCE included.
 BASE_COLUMNS = ["Rank", "Symbol", "Sector", "Price", "Setup Fit",
                 "Score Now (catalyst-neutral)", "Score at Trigger",
-                "Risk:Reward", "Relative Strength (3-month)"]
+                "Risk:Reward", "Relative Strength (3-month)",
+                # Full words, like "Average True Range" and unlike "ATR": a
+                # "U/D Vol" header needs the key to decode it, and it sits
+                # NEXT TO relative strength because both are cross-sectional
+                # measures of the same thing -- who has been buying this name.
+                "Up/Down Volume Ratio"]
 TAIL_COLUMNS = ["Trigger Price", "Stop (1.5x Average True Range)", "Action"]
 
 
@@ -202,7 +226,11 @@ def render_table(rows, setup, shown, total):
         cells = [str(i), r["symbol"], r["sector"], _n(r["price"]),
                  _n(r["fit"]), _n(r["total"]) + ("*" if r["vetoed"] else ""),
                  _n(r["trigger_total"], "{:.2f}", "none"),
-                 _n(r["rr"], "{:.2f}:1"), _n(r["rs_3m"], "{:+.1f}")]
+                 _n(r["rr"], "{:.2f}:1"), _n(r["rs_3m"], "{:+.1f}"),
+                 # r["ud_ratio"], not r.get(...): build_result_row always sets
+                 # it, so a missing key is a bug and must raise rather than
+                 # quietly print a dash in every row of every table.
+                 _n(r["ud_ratio"], "{:.2f}")]
         cells += [fmt(r) for _, fmt in ev_cols]
         cells += [_n(r["trigger_price"], "{:.2f}", "none"), _n(r["stop"]), r["action"]]
         lines.append("| " + " | ".join(cells) + " |")
@@ -222,7 +250,10 @@ def render_key(setup):
         "for names already passing the gate, which have no trigger to wait for. Relative "
         "Strength is return minus the Nifty 50 over the same window, in percentage "
         "points. Risk:Reward is reward to the nearest real resistance divided by risk to "
-        "a 1.5x Average True Range stop. Action follows watchlist_analyser's buckets: "
+        "a 1.5x Average True Range stop. Up/Down Volume Ratio is volume on up-closes "
+        "divided by volume on down-closes over the last 50 sessions, so above 1.0 means "
+        "net accumulation and below 1.0 net distribution; it reads `-` when the stock had "
+        "no down-closes to divide by. Action follows watchlist_analyser's buckets: "
         "BUY NOW, BUY HALF, ALERT (vetoed today but the trigger repairs it), LATENT "
         "(below the bands today, but a breakout would qualify it), WATCH (matches the "
         "setup, neither buyable nor repaired by its trigger)."

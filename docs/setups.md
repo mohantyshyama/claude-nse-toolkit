@@ -28,6 +28,75 @@ and a test asserts this across the live universe.
 
 ---
 
+## Volume confirmation, and why each setup asks a different question
+
+Every setup carries a volume test, and they are deliberately **not the same test wearing
+five labels**. The setups sit at different points of one life cycle, and "healthy volume"
+means something different at each.
+
+The measure most of them use is O'Neil's **up/down volume ratio**: volume on up-closes
+divided by volume on down-closes over the last 50 sessions. Above 1.0 means more money
+changed hands on days the stock rose than on days it fell — net accumulation. Direction is
+measured *settle to settle*, not against the bar's own open: a bar can open down and close
+up and still be a down day.
+
+| Setup | Volume test | Loosened | Strict |
+|---|---|---|---|
+| **COILED** | up-thrusts in the last ~126 sessions | ≥ **1** | ≥ **2** |
+| **BREAKOUT** | *(none — it already gates the breakout bar at 1.5–2.0× average)* | — | — |
+| **LEADER** | up/down volume ratio | ≥ **1.25** | ≥ **1.50** |
+| **PULLBACK** | retracement volume ÷ advance volume | ≤ **0.90** | ≤ **0.75** |
+| **TURN** | up/down volume ratio | ≥ **1.25** | ≥ **1.50** |
+
+**Why these were added.** The setups previously used volume *negatively* — "no down-thrust
+in the last 10 bars" — and never asked any name for positive evidence that somebody was
+buying it. Measured across the live Nifty 500 the median up/down ratio was **1.33 for the
+universe and 1.34 for LEADER matches**: the setup that selects stocks near 52-week highs
+with positive relative strength had no volume edge over the tape at all. PULLBACK was worse
+in a subtler way — its median match retraced on **0.88×** the volume of its own advance, so
+half the list was "resting" on very nearly the participation that drove the move up. That is
+supply, not rest.
+
+**Why COILED counts thrusts instead.** A base has no current demand by definition — that is
+what a base *is* — so demanding a healthy up/down ratio would reject every genuine coil.
+Worse, everything else COILED tests is satisfied by a stock nobody trades: the range narrows
+because there is no participation, volatility falls to the bottom of its own history because
+nothing happens, and the dry-up gate rewards exactly that. What a base *can* be asked is
+whether anyone ever took real size in it. A base with no prior accumulation is a dead stock,
+not a coiled spring.
+
+**Why TURN is not gated on volume expansion.** The obvious candidate was the existing
+"volume since the cross vs. the 50 bars before it" figure. It was rejected as a gate because
+its answer depends on the **age of the cross**, not on demand: a cross 30–40 bars old has
+long since normalised and reads about 1.0 however strong the buying, while a three-bar-old
+cross reads high off three noisy sessions. Gating on it would reject older crosses for being
+old and call it weak volume — and TURN already has a cross-recency threshold that says so
+honestly. It remains a Fit component, where a soft input belongs.
+
+**When a measurement cannot be made, the gate closes.** A stock with no down-volume at all
+in 50 sessions has no ratio; a pullback whose swing high is not in the aligned bars has no
+legs to compare. In every such case the name is **rejected**, never passed. A gate that
+opens whenever its input is unavailable is decorative.
+
+### These thresholds are absolute, and that is a trade-off
+
+The floors above are fixed numbers, not percentiles of the day's universe. On the tape they
+were calibrated against, **73% of the Nifty 500 clears 1.0 and 54% clears 1.25** — so they
+are moderate filters, not aggressive ones.
+
+**In a broad selloff the same numbers could reject nearly everything.** If a scan comes back
+empty in a falling market, the honest reading is *"this threshold no longer suits the
+regime"* — not *"no setups exist"*. Check the rejection funnel: if most names are dying at
+the volume gate, that is the market being distributed, and the screen is describing it
+correctly even though the output is unhelpful.
+
+A percentile floor would self-adjust to the regime. It was rejected because it would also
+manufacture matches every single day, including days when the honest answer is that nothing
+is under accumulation — and a screen that always returns something is a screen that has
+stopped being evidence.
+
+---
+
 ## COILED — volatility contracting inside a base
 
 **What it looks for:** a stock that has stopped moving. Range narrowing, volatility falling
@@ -55,15 +124,26 @@ distributing, not accumulating.
 | Net contraction | last window **must** be tighter than the first | same |
 | Position in base | ≥ 50% | ≥ 60% |
 | Trend | above 50-day and 200-day, 200-day rising | plus 50-day rising |
-| Volume | 20-day average below 50-day average | ratio < 0.9 |
+| Volume — dry-up | 20-day average below 50-day average | ratio < 0.9 |
+| **Volume — accumulation** | ≥ **1** up-thrust in the last ~126 sessions | ≥ **2** |
 
 The base is split into **four equal windows** of at least 4 bars each, giving three
 consecutive comparisons. The net-contraction rule exists because a base can narrow twice
 and then blow out again — without it, a stock whose last window is *wider* than its first
 still qualified, which is not a coil by any definition.
 
+**The two volume rules pull in opposite directions on purpose.** Dry-up asks whether volume
+is quiet *now*, which is what makes a base a base. The up-thrust count asks whether the
+stock was ever *bought*, which is what makes the base worth watching. A dead stock passes
+the first and fails the second, and before the second existed it could lead the table. The
+thrust direction is read off the engine's own label, so a name that only ever traded size on
+the way *down* has been distributed, not accumulated, and does not qualify. Strict asks for
+two, because a single thrust can be an index rebalance or a block crossing.
+
 **Evidence columns:** `Contraction` (last window ÷ first — lower is tighter) and
 `Position in Base` (%).
+
+**Setup Fit:** contraction 35% · position in base 25% · dry-up 20% · accumulation 20%.
 
 **Ranked by Score at Trigger**, not today's score. The point of a coil is what happens when
 it fires, so ranking on the current entry location would bury the best setups.
@@ -109,7 +189,18 @@ close *plus* ≥2× average volume. Screening from 1.5× surfaces useful near-mi
 reporting one as a confirmed breakout would contradict the framework underneath. The row
 says `light` so you can tell them apart.
 
+**BREAKOUT is the one setup with no up/down volume gate**, and that is not an oversight.
+The breakout bar's own volume multiple is the most direct volume evidence any of these five
+setups has — a name that cleared its base on 2× average did not do it quietly, whatever a
+trailing 50-session ratio says. Adding a second volume floor on top would reject genuine
+breakouts out of bases that were, correctly, quiet.
+
 **Evidence columns:** `Volume (multiple of average 20-day)` and `Percent Above Base High`.
+
+**Setup Fit:** volume multiple 35% · freshness 25% · base quality 20% · accumulation 20%.
+The accumulation term is here even though the gate is not: it costs a breakout nothing to
+also be under accumulation, and between two otherwise identical breakouts the one being
+accumulated is the better row.
 
 **Ranked by Score Now** — the trigger has already fired, so today's location is the
 relevant question.
@@ -143,12 +234,30 @@ run.
 | **Extension guard** | ATR% **not** in top decile of its own 6-month range | not in top 15% |
 | **Extension guard** | run over last 5 sessions ≤ **10%** | ≤ **8%** |
 | Distribution | no down-thrust on ≥2.5× volume in the last 10 bars | same |
+| **Volume — accumulation** | up/down volume ratio ≥ **1.25** | ≥ **1.50** |
 
 The 1-month floor of −2pp deliberately tolerates a shallow recent breather. A genuine
 leader resting for a fortnight should not drop out of the screen; one actively being sold
 should.
 
+**Why a leader is asked for the up/down ratio.** This is the one setup whose entire claim
+is that somebody with size is buying the stock — that is what "leadership" means, and
+everything else in the table is a consequence rather than the thing itself. Proximity to
+the 52-week high, a clean average stack and positive relative strength are all satisfied by
+a name drifting up on nobody's participation, and the distribution test above only asks
+that nothing violent happened in ten sessions. Measured on the live universe that is
+exactly what the setup was doing: median up/down ratio **1.34 against a universe median of
+1.33** — a price screen wearing a volume screen's reputation. The ratio is the direct
+question, asked over the same 50 sessions for every name, and 1.25 is not a demanding
+answer for a stock that is supposed to be leading.
+
 **Evidence columns:** `Percent From 52-Week High` and `Relative Strength (1-month)`.
+
+**Setup Fit:** relative strength 3-month 35% · proximity to the high 30% · stack
+completeness 15% · accumulation 20%. Every name reaching Fit has already cleared 1.25 and
+so scores at least 6 on the accumulation term — the term still earns its weight, because
+the gate cannot tell 1.26 from 3.0 and on this setup that is precisely the distinction the
+ranking should show.
 
 **Ranked by Score Now**, tie-broken on 3-month relative strength.
 
@@ -199,8 +308,9 @@ value. This one does not.
 | **Reversal — closed strong** | close in the top **50%** of the bar's range | top **40%** |
 | **Reversal — recency** | the last closed bar **or the one before it** | last closed bar only |
 | Momentum | RSI 38–62 | RSI 40–58 |
-| Volume | 20-day average / 50-day average < 1.1 | < 1.0 |
+| Volume — dry-up | 20-day average / 50-day average < 1.1 | < 1.0 |
 | Distribution | no down-thrust in last 8 bars | 10 bars |
+| **Volume — the retracement** | pullback volume ÷ advance volume ≤ **0.90** | ≤ **0.75** |
 
 **Both new conditions exist because of real failures, measured on live data.**
 
@@ -226,9 +336,39 @@ day, and demanding the hammer itself be the final bar throws away the second day
 genuine reversal. CEMPRO is the case: its hammer was the 30th, and the 31st closed strong
 without reaching back to the 50-day. Strict takes the last closed bar alone.
 
+**Why the volume test here compares two legs rather than reading a ratio.** A pullback is
+the one stage of the life cycle where the *right* answer is quiet volume: holders sitting
+still while price comes back to support is what "resting" looks like, and an up/down ratio
+would ask this setup for the accumulation it is by definition not showing this week. The
+question that does belong here is comparative — is the retracement drawing less
+participation than the advance it retraces? So the screen averages volume over the **30
+bars before the swing high** (the advance) and over the **pivot bar to the last closed one**
+(the pullback), and divides. The pivot belongs to the pullback leg: it is the bar that
+printed the high, and when its print is a climax, counting it against the pullback makes
+the gate harder to pass, which is the safe direction for a gate that exists to demand
+evidence. Either leg shorter than 5 bars, or a swing high not found in the aligned bars,
+makes the ratio unmeasurable — and the name is rejected.
+
+Neither existing volume rule could ask this. Dry-up compares a 20-day average against a
+50-day one, which is a statement about the last month that knows nothing about where the
+pullback began; the down-thrust test only asks that no single bar exceeded 2.5× average. A
+stock can retrace on steady heavy volume for a fortnight and pass both, and the median
+match did: **0.88×** the volume of its own advance. Half the list was resting on very nearly
+the participation that drove the move up, which is supply, not rest.
+
 **Evidence columns:** `Close Position in Reversal Bar` and `Percent Below Recent Swing
 High`. Distance-to-average and RSI used to sit here; both are already inside the entry
 gate, and neither could separate a name that turned at support from one falling into it.
+
+**Setup Fit:** distance to the average 30% · RSI near 50 20% · pullback-versus-advance
+volume 25% · retracement depth 15% · accumulation 10%. The blunt `dryup` term this setup
+used to score is **replaced**, not merely outweighed — both claimed to measure "is this
+retracement quiet", and keeping the pair would have scored one idea twice while giving the
+worse measurement half the credit. Dry-up remains a live *gate*, and its number stays in
+the evidence so a reader can still see what let a name through. Accumulation carries the
+smallest weight of the five setups here, at 10%: PULLBACK already spends 25% on a volume
+term of its own, and the up/down ratio on this setup describes the trend the pullback
+interrupts rather than the pullback itself.
 
 **Expect a short list.** Most dips do not end on the day you look at them, so PULLBACK is
 now the narrowest of the five setups by some margin. A short list is the gate working.
@@ -260,8 +400,30 @@ flattening average, not evidence of demand.
 | Position | above both the 50-day and 200-day | same |
 | Momentum | MACD histogram > 0 and RSI > **48** | RSI > **50** |
 | Off the low | ≥ **12%** above the 52-week low | ≥ **20%** |
+| **Volume — accumulation** | up/down volume ratio ≥ **1.25** | ≥ **1.50** |
+
+**A new trend nobody is accumulating is a moving average crossing, not a turn.** Every
+other condition in that table is price or price-derived: two averages, their order, a
+histogram, an RSI, a distance off the low. A stock can produce all of it by drifting up on
+no participation at all — which is precisely what a golden cross *is* when it is an
+artifact of the 200-day flattening rather than of demand, and the distance-from-low test
+was the only thing standing between the screen and that name. The up/down ratio asks
+directly whether anyone has been buying the days.
+
+**It is deliberately not gated on `vol_expansion`** — the volume-since-the-cross figure —
+even though that measure is already computed and looks like the obvious candidate. See
+*Volume confirmation* above: its answer tracks the age of the cross rather than the
+strength of demand, so gating on it would reject older crosses for being old and call it
+weak volume. It stays a Fit component, where a soft input belongs.
 
 **Evidence columns:** `Bars Since Cross` and `MACD Histogram`.
+
+**Setup Fit:** cross recency 30% · 200-day slope 25% · volume expansion 15% · MACD 10% ·
+accumulation 20%. Volume expansion and accumulation are both here and they are not
+redundant: expansion is anchored to the cross and decays as the cross ages, while the
+up/down ratio is a fixed 50-bar window that answers "who is winning the days" regardless of
+when the cross happened. That decay is why expansion is a Fit component and never a gate,
+and why it now carries less weight than the measure that does not decay.
 
 **Ranked by Score at Trigger**, like COILED — a fresh trend is usually mid-base, so the
 projection is more informative than today's location.
@@ -298,6 +460,14 @@ strength. The matched-setup label is shown rather than folded into a hidden weig
 because a 2-way `COILED+LEADER` and a 2-way `COILED+PULLBACK` are worth different things
 and you should be able to see which you have.
 
+**Since Fit now carries an accumulation term, CONFLUENCE ordering has changed.** The tie
+inside a match-count group breaks on mean Setup Fit, and every constituent Fit moved when
+the weights were rebalanced — so two names that used to sit in a given order can now sit in
+the other one on the strength of their up/down ratio alone. The ratio is a property of the
+symbol rather than of any one setup, so a CONFLUENCE row copies the identical figure its
+constituent rows print; a column that disagreed with its own inputs would be worse than no
+column.
+
 ---
 
 ## Reading the output
@@ -307,6 +477,14 @@ and you should be able to see which you have.
 Fit answers "how textbook is this instance of *this* setup" — base tightness and dry-up for
 COILED, volume multiple and freshness for BREAKOUT. **An 8 for COILED and an 8 for PULLBACK
 are different measurements.** Never compare Fit across tables.
+
+All five formulas now share one **accumulation** term, scored from the up/down volume ratio
+on a single band (≥2.50 → 10 · 2.00–2.50 → 9 · 1.50–2.00 → 8 · 1.25–1.50 → 6 · 1.00–1.25 →
+4 · below 1.00 → 2), so that "accumulation" means the same thing in every table even though
+the Fit it feeds does not. An unmeasurable ratio scores the same floor as a distributing
+one: a score that rewarded the *absence* of evidence would rank an unmeasured name above a
+measured one. The term was not bolted on top — every other weight came down to make room,
+so a Fit is still out of 10, comparable with yesterday's in kind if not in value.
 
 Fit is a column, not the sort key. A pristine pattern in a weak stock should not outrank a
 good pattern in a strong one.
@@ -325,7 +503,28 @@ is the failure the whole system exists to prevent.
 Vetoed names are kept rather than dropped, with the price that would repair the setup —
 a good chart you cannot buy today is information.
 
-### Action labels
+### The Up/Down Volume Ratio column
+
+Every table carries `Up/Down Volume Ratio`, CONFLUENCE included, and the CSV carries it as
+`ud_ratio` immediately after `rs_3m` — taking the file from 26 columns to 27. It is a
+**base column, not evidence**: like Risk:Reward and relative strength it is one number
+meaning one thing for every name, rather than one of the two setup-specific facts each
+table reports.
+
+It is shown **whether or not it gated**. LEADER and TURN reject on it, so their columns can
+never read below their floor; COILED, BREAKOUT and PULLBACK do not, so theirs can read
+anything — and on those tables it is the most useful number in the row, because it is the
+one fact the setup did not test.
+
+**Below 1.0 means the price chart and the volume disagree.** More money changed hands
+pushing the stock down than pushing it up, on a name that nonetheless cleared a bullish
+setup's every price condition. That is not automatically disqualifying — a coil is supposed
+to be quiet and a pullback is supposed to be sold — but it is the thing to check before
+acting on the row.
+
+It reads `-` when the ratio could not be measured: no down-closes in the window to divide
+by, which in practice means the series is too short or too flat to judge. A dash is not a
+1.00 and must not be read as one.
 
 `BUY NOW` · `BUY HALF` · `ALERT` (vetoed today, but the trigger repairs it) · `LATENT`
 (below the bands today, but a breakout would qualify it) · `WATCH` (matches the setup,

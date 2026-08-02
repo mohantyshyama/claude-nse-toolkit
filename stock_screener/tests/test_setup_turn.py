@@ -33,9 +33,13 @@ def ma(sma50=101.0, sma200=100.0):
 
 
 def ctx(bars_since_cross=15, **over):
+    # ud_ratio 1.60 clears both the loosened 1.25 floor and the strict 1.50 one,
+    # so every pre-existing case here still turns on the condition it was written
+    # for. The gate itself is probed by TestTurnNeedsAccumulation.
     c = {"rows": trend_series(260), "rs": {"1m": 2.0, "3m": 6.0},
          "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
-         "bars_since_cross": bars_since_cross, "vol_expansion": 1.35}
+         "bars_since_cross": bars_since_cross, "vol_expansion": 1.35,
+         "ud_ratio": 1.60}
     c.update(over)
     return c
 
@@ -46,13 +50,29 @@ def rows_from(closes, vol=1_000_000, span=1.0):
     return [bar(i, c, c + span, c - span, c, vol) for i, c in enumerate(closes)]
 
 
-def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000):
-    """A V: `down_n` falling bars then `up_n` rising ones.
+def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000,
+           pause_at=-8):
+    """A V: `down_n` falling bars then `up_n` rising ones, with ONE pause.
 
     The 50-day average crosses back above the 200-day a fixed 59 bars into the
     recovery, so bars_since_cross is exactly `up_n - 59` for any up_n from 59 to
     118. That closed form is what lets the cross thresholds be probed at the
     bar rather than approximately.
+
+    `pause_at` swaps two adjacent closes near the end so the advance prints one
+    DOWN close. Without it every bar in the last 50 closes up, ud_ratio has no
+    denominator at all, and TURN's volume gate rejects the whole rig for a
+    reason the fixture never meant to express -- the exact blind spot a
+    monotonic series creates.
+
+    A SWAP, not an inserted dip, because a swap is invisible to almost
+    everything else this fixture is asked to be: the multiset of closes is
+    unchanged, so the median turnover the liquidity gate reads is identical to
+    the bit; and every moving-average window containing BOTH bars sums to
+    exactly what it did before, so only a window beginning between them differs
+    -- one SMA value, mid-recovery, nowhere near the cross. The highs and lows
+    travel with their closes so the bars stay well formed and the base high a
+    breakout must clear is unmoved.
     """
     rows, c = [], top
     for _ in range(down_n):
@@ -61,6 +81,16 @@ def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000):
     for _ in range(up_n):
         c += up_step
         rows.append(bar(len(rows), c, c + 1, c - 1, c, vol))
+    return pause(rows, pause_at)
+
+
+def pause(rows, at):
+    """Swap the closes of bars `at` and `at + 1`, highs and lows following."""
+    if at is None or len(rows) < abs(at) + 1:
+        return rows
+    rows[at]["c"], rows[at + 1]["c"] = rows[at + 1]["c"], rows[at]["c"]
+    for r in (rows[at], rows[at + 1]):
+        r["h"], r["l"] = r["c"] + 1, r["c"] - 1
     return rows
 
 
@@ -123,7 +153,9 @@ class TestTurnMatches(unittest.TestCase):
     def test_evidence_reports_every_documented_key(self):
         ev = setups.match_turn(result(), ctx())
         self.assertEqual(set(ev), {"bars_since_cross", "macd_hist",
-                                   "sma200_rising", "vol_expansion"})
+                                   "sma200_rising", "vol_expansion",
+                                   "ud_ratio"})
+        self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
         self.assertAlmostEqual(ev["macd_hist"], 0.4, places=6)
         self.assertAlmostEqual(ev["vol_expansion"], 1.35, places=6)
         self.assertIs(ev["sma200_rising"], True)
@@ -286,8 +318,11 @@ class TestTurnStrict(unittest.TestCase):
 
 class TestTurnFit(unittest.TestCase):
     def ev(self, **over):
+        # 1.60 matches ctx()'s ratio, bands to 8 mid-ladder, and clears TURN's
+        # own 1.25/1.50 gate -- so this hand-built evidence describes a name the
+        # screen would actually show.
         e = {"bars_since_cross": 15, "macd_hist": 0.4, "sma200_rising": True,
-             "vol_expansion": 1.35}
+             "vol_expansion": 1.35, "ud_ratio": 1.60}
         e.update(over)
         return e
 
@@ -304,32 +339,55 @@ class TestTurnFit(unittest.TestCase):
         self.assertGreater(setups.fit_turn(self.ev(vol_expansion=1.5)),
                            setups.fit_turn(self.ev(vol_expansion=1.0)))
 
-    def test_weights_are_thirty_five_thirty_twenty_fifteen(self):
-        """cross 15 -> 9, slope True -> 10, expansion 1.35 -> 10, macd + -> 10.
-        0.35*9 + 0.30*10 + 0.20*10 + 0.15*10 = 3.15 + 6.5 = 9.65. Each further
-        case moves exactly one term, pinning its weight rather than the sum.
+    def test_weights_are_thirty_twenty_five_fifteen_ten_twenty(self):
+        """cross 15 -> 9, slope True -> 10, expansion 1.35 -> 10, macd + -> 10,
+        accumulation 1.60 -> 8.
+        0.30*9 + 0.25*10 + 0.15*10 + 0.10*10 + 0.20*8
+          = 2.7 + 2.5 + 1.5 + 1.0 + 1.6 = 9.3. Each further case moves exactly
+        one term, pinning its weight rather than the sum.
         """
-        self.assertAlmostEqual(setups.fit_turn(self.ev()), 9.65, places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=5)), 10.0,
+        self.assertAlmostEqual(setups.fit_turn(self.ev()), 9.3, places=6)
+        self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=5)), 9.6,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(sma200_rising=False)), 7.85,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(sma200_rising=False)), 7.8,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=1.2)), 9.25,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=1.2)), 9.0,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=-0.1)), 9.05,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=-0.1)), 8.9,
                                places=6)
+        self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=1.30)), 8.9,
+                               places=6)
+
+    def test_accumulation_outweighs_volume_expansion(self):
+        """Not an accident of the table: the two are both volume terms, and the
+        one that does NOT decay with the age of the cross carries more.
+
+        vol_expansion measures against the 50 bars before the cross, so it falls
+        back towards 1.0 as the cross ages however strong the demand -- which is
+        why it is a Fit component and never a gate. Moving accumulation a full
+        rung must therefore move the score by more than moving vol_expansion a
+        full rung does.
+        """
+        w = setups.FIT_WEIGHTS["TURN"]
+        self.assertGreater(w["accumulation"], w["vol_expansion"])
+        acc_step = (setups.fit_turn(self.ev(ud_ratio=1.60))
+                    - setups.fit_turn(self.ev(ud_ratio=1.30)))
+        exp_step = (setups.fit_turn(self.ev(vol_expansion=1.35))
+                    - setups.fit_turn(self.ev(vol_expansion=1.20)))
+        self.assertAlmostEqual(acc_step, 0.4, places=6)
+        self.assertAlmostEqual(exp_step, 0.3, places=6)
 
     def test_slope_bonus_is_exactly_six_points_of_sub_score(self):
         self.assertAlmostEqual(setups.fit_turn(self.ev(sma200_rising=True))
                                - setups.fit_turn(self.ev(sma200_rising=False)),
-                               1.8, places=6)
+                               1.5, places=6)
 
     def test_macd_bonus_is_exactly_four_points_of_sub_score(self):
         """The negative arm is unreachable through match_turn, which requires a
         positive histogram, so it can only be shown here."""
         self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=0.1))
                                - setups.fit_turn(self.ev(macd_hist=-0.1)),
-                               0.6, places=6)
+                               0.4, places=6)
         self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=0.0)),
                                setups.fit_turn(self.ev(macd_hist=-5.0)), places=6)
 
@@ -337,33 +395,53 @@ class TestTurnFit(unittest.TestCase):
         cuts = [(10, 10), (20, 9), (30, 7), (45, 5)]
         for i, (bars, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=bars)),
-                                   round(0.35 * sub + 6.5, 2), places=6,
+                                   round(0.30 * sub + 6.6, 2), places=6,
                                    msg="at cut %s" % bars)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_turn(self.ev(bars_since_cross=bars + 1)),
-                round(0.35 * above + 6.5, 2), places=6,
+                round(0.30 * above + 6.6, 2), places=6,
                 msg="just above cut %s" % bars)
 
     def test_every_expansion_cut_is_reachable(self):
         cuts = [(1.30, 10), (1.10, 8), (0.0, 5)]
         for i, (mult, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=mult)),
-                                   round(3.15 + 3.0 + 0.20 * sub + 1.5, 2), places=6,
-                                   msg="at cut %s" % mult)
+                                   round(2.7 + 2.5 + 0.15 * sub + 1.0 + 1.6, 2),
+                                   places=6, msg="at cut %s" % mult)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_turn(self.ev(vol_expansion=mult - 0.001)),
-                round(3.15 + 3.0 + 0.20 * below + 1.5, 2), places=6,
+                round(2.7 + 2.5 + 0.15 * below + 1.0 + 1.6, 2), places=6,
                 msg="just below cut %s" % mult)
+
+    def test_every_accumulation_cut_is_reachable(self):
+        """The shared ladder at TURN's 20% weight. The 2.7 + 2.5 + 1.5 + 1.0
+        = 7.7 remainder is held fixed.
+
+        As with LEADER, the bottom two rungs are unreachable through match_turn,
+        whose gate floors at 1.25; they are asserted because the ladder is
+        shared with the setups where they are live.
+        """
+        cuts = [(2.50, 10), (2.00, 9), (1.50, 8), (1.25, 6), (1.00, 4)]
+        for i, (ud, sub) in enumerate(cuts):
+            self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=ud)),
+                                   round(0.20 * sub + 7.7, 2), places=6,
+                                   msg="at cut %s" % ud)
+            below = cuts[i + 1][1] if i + 1 < len(cuts) else 2.0
+            self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=ud - 0.001)),
+                                   round(0.20 * below + 7.7, 2), places=6,
+                                   msg="just below cut %s" % ud)
 
     def test_fit_stays_inside_zero_to_ten(self):
         best = self.ev(bars_since_cross=0, vol_expansion=5.0, sma200_rising=True,
-                       macd_hist=1.0)
+                       macd_hist=1.0, ud_ratio=3.0)
+        # 0.30*5 + 0.25*4 + 0.15*0 + 0.10*6 + 0.20*2
+        #   = 1.5 + 1.0 + 0.0 + 0.6 + 0.4 = 3.5
         worst = self.ev(bars_since_cross=45, vol_expansion=-1.0,
-                        sma200_rising=False, macd_hist=-1.0)
+                        sma200_rising=False, macd_hist=-1.0, ud_ratio=0.5)
         self.assertAlmostEqual(setups.fit_turn(best), 10.0, places=6)
-        self.assertAlmostEqual(setups.fit_turn(worst), 3.85, places=6)
+        self.assertAlmostEqual(setups.fit_turn(worst), 3.5, places=6)
         self.assertTrue(0.0 <= setups.fit_turn(worst) <= 10.0)
 
 
@@ -371,13 +449,15 @@ class TestTurnThresholdTable(unittest.TestCase):
     def test_registry_carries_the_spec_numbers(self):
         self.assertEqual(setups.THRESHOLDS["TURN"],
                          {"cross_bars": (45, 30), "rsi_lo": (48.0, 50.0),
-                          "off_low_pct": (12.0, 20.0)})
+                          "off_low_pct": (12.0, 20.0),
+                          "ud_ratio": (1.25, 1.50)})
 
     def test_strict_is_never_looser_than_loosened(self):
         th = setups.THRESHOLDS["TURN"]
         self.assertLessEqual(th["cross_bars"][1], th["cross_bars"][0])
         self.assertGreaterEqual(th["rsi_lo"][1], th["rsi_lo"][0])
         self.assertGreaterEqual(th["off_low_pct"][1], th["off_low_pct"][0])
+        self.assertGreaterEqual(th["ud_ratio"][1], th["ud_ratio"][0])
 
     def test_anything_matching_strict_also_matches_loosened(self):
         checked = 0
@@ -782,7 +862,7 @@ class TestBuildCtxPassThrough(unittest.TestCase):
         self.assertEqual(set(setups._ctx_from_rows(trend_series(260), {})),
                          {"rows", "rs", "atr_pctile", "sma200_rising",
                           "sma50_rising", "bars_since_cross", "vol_expansion",
-                          "run_pct"})
+                          "run_pct", "ud_ratio"})
 
 
 class TestBuildCtxPublicEntry(unittest.TestCase):
@@ -850,6 +930,96 @@ class TestBuildCtxPublicEntry(unittest.TestCase):
         scored = dict(result(), symbol="LYNX", _rows=o["_rows"])
         self.assertIsNotNone(setups.match_turn(scored, ctx_))
         self.assertEqual(setups.match_turn(scored, ctx_)["bars_since_cross"], 15)
+
+
+class TestTurnNeedsAccumulation(unittest.TestCase):
+    """The up/down volume gate.
+
+    Everything else TURN tests is price or price-derived -- two averages, their
+    order, a histogram, an RSI, a distance off the low -- all of which a stock
+    can produce by drifting up on no participation at all. That is exactly what
+    a golden cross is when it comes from the 200-day flattening rather than from
+    demand.
+    """
+
+    def test_a_cross_under_accumulation_matches(self):
+        self.assertIsNotNone(setups.match_turn(result(), ctx(ud_ratio=1.60)))
+
+    def test_a_cross_with_no_volume_behind_it_rejects(self):
+        self.assertIsNone(setups.match_turn(result(), ctx(ud_ratio=1.20)))
+
+    def test_the_floor_is_inclusive_at_1_25(self):
+        self.assertIsNotNone(setups.match_turn(result(), ctx(ud_ratio=1.25)))
+        self.assertIsNone(setups.match_turn(result(), ctx(ud_ratio=1.24)))
+
+    def test_strict_raises_the_floor_to_1_50(self):
+        for r in (1.25, 1.30, 1.49):
+            self.assertIsNotNone(setups.match_turn(result(), ctx(ud_ratio=r)))
+            self.assertIsNone(setups.match_turn(result(), ctx(ud_ratio=r),
+                                                strict=True), r)
+
+    def test_the_strict_floor_is_inclusive_at_1_50(self):
+        self.assertIsNotNone(setups.match_turn(result(), ctx(ud_ratio=1.50),
+                                               strict=True))
+
+    def test_an_unmeasurable_ratio_rejects(self):
+        self.assertIsNone(setups.match_turn(result(), ctx(ud_ratio=None)))
+
+    def test_an_absent_ratio_rejects_rather_than_raising(self):
+        c = ctx()
+        del c["ud_ratio"]
+        self.assertIsNone(setups.match_turn(result(), c))
+
+    def test_a_ratio_of_zero_rejects_through_the_comparison(self):
+        self.assertIsNone(setups.match_turn(result(), ctx(ud_ratio=0.0)))
+
+    def test_the_rejection_names_the_volume_condition(self):
+        diag = {}
+        setups.match_turn(result(), ctx(ud_ratio=1.0), diag=diag)
+        (label, _), = diag.items()
+        self.assertIn("up-closes", label)
+        self.assertIn("down-closes", label)
+
+    def test_the_gate_is_the_last_condition_applied(self):
+        """Funnel order: a name failing the off-the-low floor as well is
+        recorded there, one step earlier."""
+        diag = {}
+        setups.match_turn(result(lo52=104.0), ctx(ud_ratio=1.0), diag=diag)
+        (label, (step, _)), = diag.items()
+        self.assertIn("52-week low", label)
+        self.assertEqual(step, 7)
+
+
+class TestTurnIsNotGatedOnVolumeExpansion(unittest.TestCase):
+    """vol_expansion stays a Fit component and never a gate.
+
+    It compares volume since the cross against the 50 bars before it, so its
+    answer depends on the AGE of the cross rather than on demand: a cross 30-40
+    bars old has long since normalised and reads about 1.0 however strong the
+    buying, while a cross 3 bars old reads high off three noisy sessions.
+    Gating on it would reject older crosses for being old and call it weak
+    volume -- and TURN already has a cross-recency threshold that says so
+    honestly.
+    """
+
+    def test_a_contracted_expansion_still_matches(self):
+        ev = setups.match_turn(result(), ctx(vol_expansion=0.4))
+        self.assertIsNotNone(ev)
+        self.assertAlmostEqual(ev["vol_expansion"], 0.4, places=6)
+
+    def test_it_is_carried_as_evidence_and_priced_by_fit(self):
+        """Not gated, but not ignored either: fit_turn scores it, so a name with
+        no expansion ranks below one with it."""
+        quiet = setups.match_turn(result(), ctx(vol_expansion=0.4))
+        loud = setups.match_turn(result(), ctx(vol_expansion=1.4))
+        self.assertLess(setups.fit_turn(quiet), setups.fit_turn(loud))
+
+    def test_a_strong_expansion_does_not_rescue_a_weak_up_down_ratio(self):
+        """The other direction, which is what makes the two independent: an
+        expanding volume profile cannot buy its way past the accumulation gate.
+        """
+        self.assertIsNone(setups.match_turn(result(),
+                                            ctx(vol_expansion=3.0, ud_ratio=1.0)))
 
 
 if __name__ == "__main__":

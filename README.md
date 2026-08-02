@@ -75,7 +75,7 @@ is precisely what `watchlist_analyser` is for.
 1.5:1 against a 1.5×ATR stop is capped and demoted, however good its chart. Trend and entry
 price are separate questions, and the whole toolkit is built to keep them separate.
 
-> **A note on test coverage.** Only `stock_screener` has a test suite (914 tests). The other
+> **A note on test coverage.** Only `stock_screener` has a test suite (1054 tests). The other
 > three predate it and have none. That matters most for `analyze.py`: three skills import
 > it, so a regression there would propagate silently with nothing to catch it.
 
@@ -246,6 +246,22 @@ tightening)  way)         leads)       CONFLUENCE: two or more of the above
 | **TURN** | The early part of a confirmed new trend | Score at Trigger |
 | **CONFLUENCE** | Names matching two or more of the above | Match count |
 
+**Each setup carries a volume test, and they are deliberately not the same test wearing five
+labels.** The setups sit at different points of one life cycle, and "healthy volume" means
+something different at each: COILED asks whether the base was ever *bought* (at least one
+up-thrust in ~126 sessions), BREAKOUT already gates the breakout bar itself at 1.5–2.0×
+average and adds nothing further, LEADER and TURN require O'Neil's **up/down volume ratio**
+— volume on up-closes divided by volume on down-closes over 50 sessions — at 1.25 or better,
+and PULLBACK requires the retracement to trade on no more than 0.90× the volume of the
+advance it retraces. Strict tightens each. Before this, volume was used only *negatively*
+("no down-thrust recently"), and it showed: LEADER's median up/down ratio was 1.34 against
+a universe median of 1.33 — no volume edge at all.
+
+That same ratio is now a shared **accumulation** term inside every setup's Setup Fit —
+20% of it for COILED, BREAKOUT, LEADER and TURN, 10% for PULLBACK, which already spends 25%
+on a volume term of its own. Every other weight came down to make room, so Fit is still out
+of 10. Because CONFLUENCE ranks on mean Setup Fit, this changes CONFLUENCE ordering.
+
 **[Full writeup of each setup, with the market logic and exact thresholds →
 `docs/setups.md`](docs/setups.md)**
 
@@ -284,6 +300,18 @@ Six weighted factors, out of 10:
 Bands: **≥7.5** full position · **6.0–7.4** half · **4.5–5.9** watchlist · **<4.5** stand
 aside. The risk-reward veto overrides the band.
 
+### Every table shows the up/down volume ratio
+
+`Up/Down Volume Ratio` is a base column on every screener table, CONFLUENCE included, and
+`ud_ratio` in the CSV: volume on up-closes divided by volume on down-closes over the last
+50 sessions. It is shown whether or not it gated the setup — LEADER and TURN reject on it,
+so those columns can never read below their floor, while COILED, BREAKOUT and PULLBACK do
+not, which makes it the most informative number in those rows.
+
+**Above 1.0 is net accumulation; below 1.0 means the price chart and the volume disagree.**
+It reads `-` when the stock had no down-closes in the window to divide by — a dash is not a
+1.00 and must not be read as one.
+
 ### Screener scores are catalyst-neutral
 
 Catalyst needs a news search per name, which is not feasible across 500 stocks, so every
@@ -305,6 +333,10 @@ rows, so a seventh setup added later costs zero new columns. `setups_matched` an
 `match_count` appear on every row, so a COILED row shows the stock is also a LEADER without
 a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"` — because
 a file that needs string-stripping before a column can be sorted is not a data file.
+
+27 columns. `ud_ratio` sits immediately after `rs_3m`, alongside the other per-symbol
+metrics rather than in an evidence slot, and is written on every row including CONFLUENCE.
+An unmeasurable ratio is an empty cell, never a `1.00`.
 
 The file keeps the top 20 of each setup's ranking, so a full scan writes at most 120 rows.
 The fortieth name in a 45-name LEADER table cleared the gate and nothing more; keeping it
@@ -332,7 +364,7 @@ stock_screener/
   screener.py     parallel scan, ranking, rendering, CLI
   csv_export.py   long-format CSV export: row building and file I/O
   nifty500.txt    500 symbols with sectors, refreshable from NSE
-  tests/          857 tests
+  tests/          1054 tests
 
 stock_analyser/   analyze.py (the scoring engine), levels.py (nine-method S/R)
 watchlist_analyser/  watchlist.py (comparative scoring, relative strength)
@@ -366,7 +398,7 @@ India coverage. They silently rewrite the exchange, return no data, and then rep
 cd stock_screener && python3 -m unittest discover -s tests
 ```
 
-857 tests, no third-party test runner. Beyond the usual coverage, the suite is
+1054 tests, no third-party test runner. Beyond the usual coverage, the suite is
 **mutation-verified**: for each assertion, a deliberately wrong implementation was patched
 in and the test confirmed to fail. That practice exists because it caught things ordinary
 testing did not — including a predicate that could never match while all of its tests
@@ -383,6 +415,14 @@ A green test proves nothing on its own.
 
 ## Known limitations
 
+- **The volume floors are absolute, not percentiles of the day's universe.** On the tape
+  they were calibrated against, 73% of the Nifty 500 clears 1.0 and 54% clears 1.25 — so
+  they are moderate filters there. In a broad selloff the same fixed numbers could reject
+  nearly everything, and an empty screen would then mean *"this threshold no longer suits
+  the regime"* rather than *"no setups exist"*. Those are different findings and must not
+  be confused; check the rejection funnel to tell them apart. A percentile floor would
+  self-adjust, and was rejected because it would also manufacture matches every day,
+  including days when the honest answer is that nothing is under accumulation.
 - **Strict COILED currently matches very few names.** It is satisfiable but tight; most
   candidates die at the volatility percentile or the 3-of-3 contraction requirement.
 - **The ₹3 crore liquidity floor is inert on the Nifty 500**, where the thinnest constituent

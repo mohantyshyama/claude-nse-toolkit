@@ -7,7 +7,8 @@ from engine import A
 import setups
 from fixtures import (flat_series, trend_series, contracting_series,
                       close_at_high_series, turnover_ladder, turnover_series_cr,
-                      gapped_tr_series, varying_tr_series, divergent_values, bar)
+                      gapped_tr_series, varying_tr_series, divergent_values, bar,
+                      ud_series)
 
 
 def true_ranges(rows):
@@ -384,6 +385,282 @@ class TestSeriesHelpers(unittest.TestCase):
         """
         self.assertEqual(setups.turnover_cr([], 50), 0.0)
         self.assertEqual(setups.turnover_cr([]), 0.0)
+
+
+class TestUpDownVolumeRatio(unittest.TestCase):
+    """O'Neil's up/down volume ratio.
+
+    Every fixture here has up_vol != down_vol on purpose. A constant-volume
+    series gives a ratio of 1.0 for any correct OR wrong implementation, and a
+    series where every bar closes up has no denominator at all -- neither can
+    discriminate, which is exactly how a decorative gate gets shipped green.
+    """
+
+    def test_ratio_is_up_volume_over_down_volume(self):
+        """Three up bars at 2M and two down bars at 1M: 6M / 2M = 3.0.
+
+        The swapped implementation (down / up) returns 0.333 here, so this test
+        dies against it. Confirmed by patching the swap in.
+        """
+        rows = ud_series("uuudd")
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 3.0, places=9)
+
+    def test_a_distributing_series_reads_below_one(self):
+        """The other side of 1.0. Two up bars at 2M against three down at 1M is
+        4M / 3M = 1.333 -- so the SAME volumes with the pattern reversed must
+        NOT give 3.0, which a ratio keyed off bar count alone would."""
+        rows = ud_series("uuddd")
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 4 / 3, places=9)
+
+    def test_the_ratio_is_not_a_count_of_up_bars_over_down_bars(self):
+        """Volume, not bars. Equal counts with unequal volumes must not read 1.0.
+
+        Kills an implementation that sums 1 per bar instead of r["v"].
+        """
+        rows = ud_series("uudd", up_vol=5_000_000, down_vol=1_000_000)
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 5.0, places=9)
+
+    def test_unchanged_closes_land_on_neither_side(self):
+        """flat_vol is 9M, larger than either directional volume, so a flat bar
+        credited to the numerator or the denominator would swamp the answer."""
+        rows = ud_series("ufudfd")          # 2 up, 2 down, 2 flat
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 2.0, places=9)
+
+    def test_direction_is_measured_against_the_previous_close_not_the_open(self):
+        """A bar that closes above its own open but below yesterday's close is a
+        DOWN day, and vice versa.
+
+        Bar 1: opens 90, closes 95 -- green candle, but 100 -> 95 is a down day.
+        Bar 2: opens 99, closes 97 -- red candle, but 95 -> 97 is an up day.
+        An implementation keyed off `c > o` reports 3.0; the correct one reports
+        1/3. The engine's thrust labels use `c > o`; this measure does not.
+        """
+        rows = [bar(0, 100.0, 101.0, 99.0, 100.0, 5_000_000),
+                bar(1, 90.0, 96.0, 89.0, 95.0, 3_000_000),
+                bar(2, 99.0, 100.0, 96.0, 97.0, 1_000_000)]
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 1 / 3, places=9)
+
+    def test_only_the_last_n_bars_are_counted(self):
+        """A heavy down bar outside the window must not reach the denominator.
+
+        The first six bars are down at 4M each; the last three are up at 2M and
+        down at 1M. Over a 3-bar window only the tail counts.
+        """
+        rows = ud_series("dddddd", down_vol=4_000_000) \
+            + ud_series("uud", price=94.0, up_vol=2_000_000,
+                        down_vol=1_000_000)[1:]
+        self.assertAlmostEqual(setups.ud_ratio(rows, 3), 4.0, places=9)
+        # ...and the same series over the full window is dominated by the down
+        # bars, so the window argument is provably doing something.
+        self.assertLess(setups.ud_ratio(rows, 50), 1.0)
+
+    def test_the_first_bar_of_the_window_is_judged_against_the_bar_before_it(self):
+        """Exactly n bars are classified, not n-1.
+
+        Over a 2-bar window of "ud" the first in-window bar is an up bar at 2M
+        and the second a down bar at 1M, giving 2.0. An implementation that can
+        only classify bars whose predecessor is also inside the window sees one
+        down bar, no up volume, and returns 0.0.
+        """
+        rows = ud_series("dduud")
+        self.assertAlmostEqual(setups.ud_ratio(rows, 2), 2.0, places=9)
+
+    def test_the_very_first_bar_of_the_series_is_unclassifiable(self):
+        """anchor_vol is 7M and has no predecessor. Counting it as an up bar
+        would give 9M/1M = 9.0 rather than 2.0."""
+        rows = ud_series("ud")
+        self.assertAlmostEqual(setups.ud_ratio(rows, 50), 2.0, places=9)
+
+    def test_no_down_volume_returns_none_rather_than_dividing(self):
+        """The documented decision: a name with zero down-volume is UNMEASURABLE,
+        and _ud_ratio_ok turns that into a failed gate rather than a pass."""
+        self.assertIsNone(setups.ud_ratio(ud_series("uuuuu"), 50))
+
+    def test_a_window_of_only_flat_closes_returns_none(self):
+        """Zero on both sides -- 0/0 is not 1.0, and must not be reported as a
+        neutral ratio."""
+        self.assertIsNone(setups.ud_ratio(ud_series("fffff"), 50))
+
+    def test_zero_up_volume_is_zero_not_none(self):
+        """The denominator exists, so the answer is measurable and is 0.0.
+        Distinct from None: this name is measurably under distribution."""
+        self.assertEqual(setups.ud_ratio(ud_series("ddddd"), 50), 0.0)
+
+    def test_a_non_positive_window_returns_none(self):
+        """rows[-0:] is the WHOLE list, so an unguarded n=0 silently measures
+        two years and reports a confident number for a nonsense window."""
+        rows = ud_series("uuudd")
+        self.assertIsNone(setups.ud_ratio(rows, 0))
+        self.assertIsNone(setups.ud_ratio(rows, -5))
+
+    def test_too_few_bars_returns_none(self):
+        self.assertIsNone(setups.ud_ratio([], 50))
+        self.assertIsNone(setups.ud_ratio(ud_series("")[:1], 50))
+
+    def test_two_bars_is_the_shortest_measurable_series(self):
+        """The accept side of the len < 2 guard, at the boundary."""
+        rows = ud_series("d")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(setups.ud_ratio(rows, 50), 0.0)
+
+    def test_the_default_window_is_fifty_bars(self):
+        """n=50 is a default, so at least one call must omit it or the default is
+        unpinned. The series is built so 50 bars and the whole series disagree:
+        the first 20 bars are heavy down bars and the last 50 are net up."""
+        rows = ud_series("d" * 20, down_vol=8_000_000) \
+            + ud_series("u" * 34 + "d" * 16, price=80.0)[1:]
+        self.assertAlmostEqual(setups.ud_ratio(rows), setups.ud_ratio(rows, 50),
+                               places=9)
+        self.assertEqual(setups.UD_BARS, 50)
+        self.assertNotAlmostEqual(setups.ud_ratio(rows), setups.ud_ratio(rows, 200),
+                                  places=3)
+
+
+class TestContextExposesTheUpDownRatio(unittest.TestCase):
+    def test_ctx_carries_the_ratio_computed_over_UD_BARS(self):
+        """Computed ONCE per symbol, in the context builder, so three predicates
+        and the report all read the same number."""
+        rows = ud_series("uuudd" * 30)
+        c = setups._ctx_from_rows(rows, {"1m": 1.0, "3m": 2.0})
+        self.assertIn("ud_ratio", c)
+        self.assertAlmostEqual(c["ud_ratio"], setups.ud_ratio(rows, setups.UD_BARS),
+                               places=9)
+
+    def test_ctx_ratio_is_not_measured_over_the_whole_series(self):
+        """Pins the window at UD_BARS rather than 'everything we fetched'. The
+        first 200 bars are heavy down bars; the last 50 are net up."""
+        rows = ud_series("d" * 200, down_vol=8_000_000) \
+            + ud_series("uuudd" * 10, price=50.0)[1:]
+        c = setups._ctx_from_rows(rows, {})
+        self.assertGreater(c["ud_ratio"], 1.0)
+        self.assertLess(setups.ud_ratio(rows, len(rows)), 1.0)
+
+    def test_ctx_ratio_is_none_when_the_series_cannot_be_measured(self):
+        """A None must survive the context builder as None, not become 1.0."""
+        c = setups._ctx_from_rows(ud_series("u" * 60), {})
+        self.assertIsNone(c["ud_ratio"])
+
+
+class TestFitAccumulation(unittest.TestCase):
+    """The shared 0-10 accumulation sub-score.
+
+    ONE ladder for all five setups, so that an 8 for accumulation means the same
+    thing under LEADER as under COILED. The per-setup tests assert how much each
+    setup WEIGHTS it; this asserts what it says.
+    """
+
+    #: (ratio, sub-score) at every rung boundary, from the spec table.
+    RUNGS = [(2.50, 10.0), (2.00, 9.0), (1.50, 8.0), (1.25, 6.0), (1.00, 4.0)]
+
+    def test_each_rung_is_returned_at_its_own_floor(self):
+        for ud, sub in self.RUNGS:
+            self.assertEqual(setups.fit_accumulation(ud), sub, msg="at %s" % ud)
+
+    def test_each_floor_is_inclusive_and_a_hair_below_drops_a_rung(self):
+        """Both sides of every boundary, so no cut can move in either direction.
+
+        Without the paired just-below case a cut could be lowered (2.50 -> 2.40)
+        and the at-cut assertion would still pass.
+        """
+        for i, (ud, _sub) in enumerate(self.RUNGS):
+            below = self.RUNGS[i + 1][1] if i + 1 < len(self.RUNGS) else 2.0
+            self.assertEqual(setups.fit_accumulation(ud - 0.001), below,
+                             msg="just below %s" % ud)
+
+    def test_above_the_top_rung_stays_at_ten(self):
+        """The ladder does not keep climbing: 10 is the cap, and a name at 40x
+        must not out-score one at 2.5x by an unbounded amount."""
+        for ud in (2.50, 3.0, 12.0, 400.0):
+            self.assertEqual(setups.fit_accumulation(ud), 10.0, msg=str(ud))
+
+    def test_below_one_scores_the_floor(self):
+        """Under 1.0 is net DISTRIBUTION -- more volume on down days than up."""
+        for ud in (0.99, 0.5, 0.0):
+            self.assertEqual(setups.fit_accumulation(ud), 2.0, msg=str(ud))
+
+    def test_the_floor_is_two_and_not_zero(self):
+        """Deliberately not zero. Below 1.0 is a real measured finding about a
+        name that cleared every other gate, and zeroing the term would let one
+        soft input dominate a five-term score."""
+        self.assertEqual(setups.NO_ACCUMULATION, 2.0)
+        self.assertEqual(setups.fit_accumulation(0.4), 2.0)
+
+    def test_an_unmeasurable_ratio_scores_the_floor_not_the_top(self):
+        """None means no down-volume in the window, so the ratio cannot be
+        formed. It scores the floor, matching the decision _ud_ratio_ok makes at
+        the gates: a score that rewarded the ABSENCE of evidence would rank an
+        unmeasurable name above a measured one.
+        """
+        self.assertEqual(setups.fit_accumulation(None), 2.0)
+        self.assertEqual(setups.fit_accumulation(None),
+                         setups.fit_accumulation(0.5))
+
+    def test_it_is_monotone_in_the_ratio(self):
+        """The shape itself, not a list of points: more accumulation is never
+        worth less. A band with a transposed pair would satisfy several of the
+        point assertions above and fail this."""
+        xs = [0.0, 0.5, 0.99, 1.0, 1.24, 1.25, 1.49, 1.5, 1.99, 2.0, 2.49,
+              2.5, 9.0]
+        scores = [setups.fit_accumulation(x) for x in xs]
+        self.assertEqual(scores, sorted(scores))
+
+    def test_the_ladder_matches_the_published_cut_table(self):
+        """The cuts are DATA, and this is the table the documentation quotes."""
+        self.assertEqual([tuple(c) for c in setups.ACCUMULATION_CUTS],
+                         [(2.50, 10.0), (2.00, 9.0), (1.50, 8.0),
+                          (1.25, 6.0), (1.00, 4.0)])
+
+
+class TestFitWeights(unittest.TestCase):
+    """Every setup's Fit weights, as data.
+
+    They are a module-level table rather than literals inside five expressions
+    precisely so that the sum can be asserted about the CODE the fits run on,
+    instead of being a claim a docstring makes near it.
+    """
+
+    def test_every_setup_has_a_weight_set(self):
+        self.assertEqual(set(setups.FIT_WEIGHTS), set(setups.SETUPS))
+
+    def test_each_weight_set_sums_to_exactly_one(self):
+        """Exactly 1.0, with no tolerance -- these five sets are chosen so that
+        binary floating point lands on 1.0 on the nose. A Fit that summed to
+        0.95 or 1.05 would still look like a 0-10 score and would silently
+        rescale every table.
+        """
+        for name, weights in setups.FIT_WEIGHTS.items():
+            self.assertEqual(sum(weights.values()), 1.0, msg=name)
+
+    def test_every_setup_carries_an_accumulation_term(self):
+        """All five, including BREAKOUT, which has no up/down volume GATE. The
+        measure ranks everywhere even where it does not filter."""
+        for name, weights in setups.FIT_WEIGHTS.items():
+            self.assertIn("accumulation", weights, msg=name)
+            self.assertGreater(weights["accumulation"], 0.0, msg=name)
+
+    def test_the_published_weights_are_the_ones_in_the_table(self):
+        """The documentation quotes these numbers; a change here is a change to
+        SKILL.md and docs/setups.md and must not pass silently."""
+        self.assertEqual(setups.FIT_WEIGHTS, {
+            "COILED":   {"contraction": 0.35, "pos_in_base": 0.25,
+                         "dryup": 0.20, "accumulation": 0.20},
+            "BREAKOUT": {"vol_mult": 0.35, "freshness": 0.25,
+                         "base_quality": 0.20, "accumulation": 0.20},
+            "LEADER":   {"rs_3m": 0.35, "proximity": 0.30,
+                         "stack": 0.15, "accumulation": 0.20},
+            "PULLBACK": {"dist_to_ma": 0.30, "rsi": 0.20, "pullback_vol": 0.25,
+                         "retrace_depth": 0.15, "accumulation": 0.10},
+            "TURN":     {"cross_recency": 0.30, "sma200_slope": 0.25,
+                         "vol_expansion": 0.15, "macd": 0.10,
+                         "accumulation": 0.20}})
+
+    def test_pullback_no_longer_weights_the_blunt_dryup_term(self):
+        """It was REPLACED by the pullback-versus-advance ratio, not merely
+        reduced -- the two measure the same idea and only one measures it
+        properly. dryup remains a live GATE."""
+        self.assertNotIn("dryup", setups.FIT_WEIGHTS["PULLBACK"])
+        self.assertIn("pullback_vol", setups.FIT_WEIGHTS["PULLBACK"])
+        self.assertIn("dryup", setups.THRESHOLDS["PULLBACK"])
 
 
 class TestTruncate(unittest.TestCase):

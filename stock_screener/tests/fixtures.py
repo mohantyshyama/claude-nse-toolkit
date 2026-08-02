@@ -98,6 +98,37 @@ def turnover_ladder(n, first_cr=1, price=100.0, open_ratio=0.9):
     return turnover_series_cr([first_cr + i for i in range(n)], price, open_ratio)
 
 
+def ud_series(pattern, price=100.0, step=1.0, up_vol=2_000_000,
+              down_vol=1_000_000, flat_vol=9_000_000, anchor_vol=7_000_000):
+    """Bars whose close direction follows `pattern`, with a DIFFERENT volume on
+    up bars, down bars and unchanged bars.
+
+    `pattern` is a string of "u" (close above the previous close), "d" (below)
+    and "f" (flat). A leading anchor bar carries the starting close; it has no
+    predecessor and so belongs to neither side of the ratio.
+
+    Every volume is deliberately distinct, because a constant-volume fixture
+    cannot tell a correct up/down ratio from a wrong one -- with one volume the
+    ratio collapses to a count of up bars over down bars and a swapped numerator
+    and denominator merely inverts a number the test would have to know anyway.
+    Here up_vol != down_vol, so the swap is visible; flat_vol and anchor_vol are
+    the largest of the four, so a bar wrongly credited to either side moves the
+    answer by more than any rounding.
+    """
+    rows = [bar(0, price, price + 1.0, price - 1.0, price, anchor_vol)]
+    c = price
+    for i, ch in enumerate(pattern, start=1):
+        prev = c
+        if ch == "u":
+            c, v = prev + step, up_vol
+        elif ch == "d":
+            c, v = prev - step, down_vol
+        else:
+            v = flat_vol
+        rows.append(bar(i, prev, max(prev, c) + 1.0, min(prev, c) - 1.0, c, v))
+    return rows
+
+
 def gapped_tr_series(n=40, start=100.0, vol=1_000_000):
     """Bars whose true range varies bar to bar AND that gap in both directions.
 

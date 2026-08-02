@@ -213,13 +213,25 @@ class _ProjStub:
         return False
 
 
+# Sentinel for "build the matched entry the way a producer that never learnt
+# about the ratio would" -- the key absent altogether, which is NOT the same
+# fixture as the key present and None.
+OMITTED = object()
+
+
 def scanned(verdict="WATCHLIST - WAIT FOR TRIGGER", rr=2.4, atr=10.0,
             evidence=None, price=200.0, total=6.2, fit=8.1,
-            rs=None, sector="Information Technology"):
+            rs=None, sector="Information Technology", ud_ratio=1.47):
+    """One scan() row. The matched entry follows setups.evaluate's contract:
+    `ud_ratio` sits at the TOP LEVEL beside `fit` and `evidence`, which is what
+    build_result_row reads, so the fixture is built here rather than borrowed
+    from setups.py."""
+    hit = {"fit": fit, "evidence": {} if evidence is None else evidence}
+    if ud_ratio is not OMITTED:
+        hit["ud_ratio"] = ud_ratio
     return {"symbol": "TCS", "sector": sector,
             "rs": rs if rs is not None else {"1m": 3.0, "3m": 11.0},
-            "matched": {"LEADER": {"fit": fit,
-                                   "evidence": {} if evidence is None else evidence}},
+            "matched": {"LEADER": hit},
             "o": {"price": price, "score": {"total": total, "verdict": verdict},
                   "entry_gate": {"rr_at_current_price": rr},
                   "atr": {"daily": atr}}}
@@ -257,6 +269,66 @@ class TestBuildResultRow(unittest.TestCase):
         with _ProjStub(None):
             r = screener.build_result_row(scanned(atr=None), "LEADER")
         self.assertIsNone(r["stop"])
+
+    def test_the_up_down_ratio_is_lifted_off_the_matched_entry(self):
+        """The row is what the table and the CSV both render, so the wiring from
+        the matched entry to the row is the whole of the reporting change.
+
+        The value is deliberately not one the fixture uses anywhere else: a
+        build_result_row reading some other key would produce None here, and
+        None is exactly what an unmeasurable ratio looks like -- so a distinctive
+        number is the only thing that separates "read the right key" from
+        "read nothing at all".
+        """
+        with _ProjStub(None):
+            r = screener.build_result_row(scanned(ud_ratio=1.47), "LEADER")
+        self.assertAlmostEqual(r["ud_ratio"], 1.47, places=6)
+
+    def test_it_is_the_top_level_key_and_not_the_evidence_slot(self):
+        """The two disagree here on purpose. setups.evaluate puts the ratio at
+        the top level of every matched entry -- CONFLUENCE included, where the
+        evidence slots are already spoken for -- so that is the key with the
+        contract. A build_result_row still reading `evidence["ud_ratio"]` would
+        return 9.99 and pass every other test in this class."""
+        with _ProjStub(None):
+            r = screener.build_result_row(
+                scanned(ud_ratio=1.47, evidence={"ud_ratio": 9.99}), "LEADER")
+        self.assertAlmostEqual(r["ud_ratio"], 1.47, places=6)
+
+    def test_an_unmeasurable_ratio_stays_none_on_the_row(self):
+        """`or 1.0` here would put a confident 1.00 in the terminal column and
+        in the CSV cell for every name whose ratio could not be formed."""
+        with _ProjStub(None):
+            r = screener.build_result_row(scanned(ud_ratio=None), "LEADER")
+        self.assertIsNone(r["ud_ratio"])
+
+    def test_a_measured_zero_stays_zero_on_the_row(self):
+        """The other value `or 1.0` would swallow. 0.0 is a name with no
+        up-volume at all -- measured, not missing."""
+        with _ProjStub(None):
+            r = screener.build_result_row(scanned(ud_ratio=0.0), "LEADER")
+        self.assertEqual(r["ud_ratio"], 0.0)
+
+    def test_a_matched_entry_without_the_key_raises_rather_than_blanking(self):
+        """The sibling arm of the None case, and a different failure. None is a
+        measurement that could not be formed; a MISSING key is a producer that
+        broke the contract, and a `.get` default would print a dash in every row
+        of every table -- a silent claim that the market has no volume data.
+        Nothing downstream can tell those two apart once they both read None,
+        so the absence has to raise here."""
+        with _ProjStub(None):
+            with self.assertRaises(KeyError):
+                screener.build_result_row(scanned(ud_ratio=OMITTED), "LEADER")
+
+    def test_the_evidence_slot_alone_does_not_satisfy_the_contract(self):
+        """A predicate that carries the ratio only in its evidence has not been
+        migrated, and quietly reading it from there would hide that from the one
+        setup whose evidence cannot carry it at all."""
+        with _ProjStub(None):
+            with self.assertRaises(KeyError):
+                screener.build_result_row(
+                    scanned(ud_ratio=OMITTED, evidence={"ud_ratio": 1.47}),
+                    "LEADER")
 
     def test_ratio_below_one_point_five_is_vetoed(self):
         with _ProjStub(None):
@@ -302,11 +374,16 @@ class TestBuildResultRow(unittest.TestCase):
         self.assertIn("o", r)
 
     def test_the_fit_reported_is_the_selected_setups_fit(self):
-        row = scanned(fit=8.1)
-        row["matched"]["COILED"] = {"fit": 2.2, "evidence": {}}
+        """Every field on the row comes from the entry for the setup being
+        rendered. The two entries carry different ratios here only to prove
+        which one is read -- in a real scan they are the same number, because
+        evaluate() copies it from one per-symbol context."""
+        row = scanned(fit=8.1, ud_ratio=1.47)
+        row["matched"]["COILED"] = {"fit": 2.2, "evidence": {}, "ud_ratio": 2.22}
         with _ProjStub(None):
-            self.assertAlmostEqual(
-                screener.build_result_row(row, "COILED")["fit"], 2.2)
+            built = screener.build_result_row(row, "COILED")
+        self.assertAlmostEqual(built["fit"], 2.2)
+        self.assertAlmostEqual(built["ud_ratio"], 2.22, places=6)
 
 
 class TestRankingEdges(unittest.TestCase):

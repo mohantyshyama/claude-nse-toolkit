@@ -28,7 +28,7 @@ COLUMNS = ["scan_date", "last_closed_bar", "universe", "mode",
            "setup", "rank", "setup_fit",
            "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
            "price", "trigger_price", "stop",
-           "rs_1m", "rs_3m",
+           "rs_1m", "rs_3m", "ud_ratio",
            "setups_matched", "match_count",
            "evidence_1_label", "evidence_1_value",
            "evidence_2_label", "evidence_2_value",
@@ -73,6 +73,13 @@ EVIDENCE = {
 SCORE_PLACES = 2
 RS_PLACES = 1
 EVIDENCE_PLACES = 3
+# The up/down volume ratio is published to the SAME two places the terminal
+# column prints, and deliberately not to EVIDENCE_PLACES: it is not evidence
+# living in 0..1 where the third decimal separates two names, it is a ratio
+# around 1.0 built from 50 bars of volume, and 1.472 vs 1.473 is noise the
+# input cannot support. Two places also means the file and the screen never
+# show a reader two different numbers for the same measurement.
+UD_PLACES = 2
 
 # Rows the FILE keeps per setup, ranked. Six setups therefore write at most 120
 # rows for a full scan.
@@ -259,6 +266,16 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
                 "stop": num(r["stop"]),
                 "rs_1m": num(r["rs_1m"], RS_PLACES),
                 "rs_3m": num(r["rs_3m"], RS_PLACES),
+                # A dedicated column immediately after rs_3m, not an evidence
+                # slot: it means the same thing on every row of every setup,
+                # including CONFLUENCE. num() leaves an unmeasurable ratio as an
+                # empty cell rather than writing a neutral 1.0.
+                #
+                # Subscript, not `.get`: build_result_row sets the key on every
+                # row it builds, so a row without it is a caller bug. `.get`
+                # would write an empty cell for the whole file and read as "the
+                # market has no volume data" instead of raising.
+                "ud_ratio": num(r["ud_ratio"], UD_PLACES),
                 "setups_matched": "|".join(matched),
                 "match_count": len(matched),
                 "evidence_1_label": e1_label,

@@ -7,6 +7,7 @@ def row(sym="TCS", **over):
     r = {"symbol": sym, "sector": "Information Technology", "price": 3200.0,
          "fit": 8.4, "total": 6.9, "trigger_total": 7.4, "trigger_price": 3300.0,
          "stop": 3100.0, "rr": 2.1, "rs_1m": 3.2, "rs_3m": 11.5,
+         "ud_ratio": 1.47,
          "vetoed": False, "action": "BUY HALF", "match_count": 1,
          "evidence": {"vol_mult": 2.4, "pct_above_base": 1.8, "base_bars": 22,
                       "tightness": 6.0, "volume_light": False,
@@ -39,6 +40,105 @@ class TestColumns(unittest.TestCase):
         for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
             for _, fmt in screener.EVIDENCE_COLUMNS[name]:
                 self.assertIsInstance(fmt(row()), str)
+
+
+class TestUpDownVolumeColumn(unittest.TestCase):
+    """A dedicated column, not an evidence slot.
+
+    It is a universal metric like Risk:Reward -- one number meaning one thing
+    for every name -- so it belongs to BASE_COLUMNS and appears in every table.
+    """
+
+    HEADER = "Up/Down Volume Ratio"
+
+    def test_it_is_a_base_column_and_not_an_evidence_slot(self):
+        self.assertIn(self.HEADER, screener.BASE_COLUMNS)
+        for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
+            self.assertNotIn(self.HEADER,
+                             [h for h, _ in screener.EVIDENCE_COLUMNS[name]],
+                             name)
+
+    def test_every_setup_table_carries_the_column_including_confluence(self):
+        """CONFLUENCE included, which an evidence-slot implementation could not
+        do -- its two slots are already the matched label and the mean fit."""
+        for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
+            out = screener.render_table([row()], name, shown=1, total=1)
+            self.assertIn(self.HEADER, out, name)
+            self.assertIn("1.47", out, name)
+
+    def test_the_header_is_full_words(self):
+        """House style: 'Average True Range', never 'ATR'. A 'U/D Vol' header
+        would need the key to explain it."""
+        for banned in ("U/D", "UD ", "Vol.", "Ratio (U"):
+            self.assertNotIn(banned, self.HEADER)
+
+    def test_the_value_is_rendered_to_two_places(self):
+        out = screener.render_table([row(ud_ratio=2.3456)], "LEADER",
+                                    shown=1, total=1)
+        self.assertIn("2.35", out)
+        self.assertNotIn("2.3456", out)
+
+    def test_an_unmeasurable_ratio_renders_a_dash_not_a_neutral_one(self):
+        """None means the stock had no down-closes to divide by. Printing 1.00
+        would state a measurement that was never made."""
+        out = screener.render_table([row(ud_ratio=None)], "LEADER",
+                                    shown=1, total=1)
+        cells = [c.strip() for c in out.splitlines()[-1].strip("|").split("|")]
+        idx = screener.BASE_COLUMNS.index(self.HEADER)
+        self.assertEqual(cells[idx], "-")
+
+    def test_a_row_without_the_key_raises_rather_than_printing_a_dash(self):
+        """build_result_row always sets it, so a missing key is a bug. A `.get`
+        would print a dash in EVERY row of EVERY table and look like a market
+        with no volume data at all."""
+        r = row()
+        del r["ud_ratio"]
+        with self.assertRaises(KeyError):
+            screener.render_table([r], "LEADER", shown=1, total=1)
+
+    def test_it_sits_beside_relative_strength(self):
+        """The two cross-sectional measures belong together: relative strength
+        is who has been buying the name against the index, the up/down ratio is
+        who has been buying it against itself. Placement is part of the
+        specification, not cosmetics -- a column parked between Price and Setup
+        Fit reads as a property of the setup instead."""
+        cols = screener.BASE_COLUMNS
+        self.assertEqual(cols[cols.index("Relative Strength (3-month)") + 1],
+                         self.HEADER)
+
+    def test_each_row_prints_its_own_ratio(self):
+        """Three rows, three DIFFERENT ratios, none of them equal to any other
+        number on its own row. A fixture repeating one value down the column
+        cannot tell a per-row read from a constant, and cannot tell the right
+        field from a neighbouring one."""
+        rows = [row("AAA", ud_ratio=1.11, rs_3m=44.4, rr=5.5, fit=6.6),
+                row("BBB", ud_ratio=2.22, rs_3m=55.5, rr=6.6, fit=7.7),
+                row("CCC", ud_ratio=3.33, rs_3m=66.6, rr=7.7, fit=8.8)]
+        out = screener.render_table(rows, "LEADER", shown=3, total=3)
+        lines = out.splitlines()
+        headers = [c.strip() for c in lines[1].strip("|").split("|")]
+        idx = headers.index(self.HEADER)
+        printed = [[c.strip() for c in line.strip("|").split("|")][idx]
+                   for line in lines[-3:]]
+        self.assertEqual(printed, ["1.11", "2.22", "3.33"])
+
+    def test_the_column_sits_where_the_header_row_says_it_does(self):
+        """Header order and cell order are built from two different lists, so a
+        column inserted into one and not the other would misalign every row to
+        its right without changing the column count."""
+        out = screener.render_table([row(ud_ratio=1.47)], "LEADER",
+                                    shown=1, total=1)
+        headers = [c.strip() for c in out.splitlines()[1].strip("|").split("|")]
+        cells = [c.strip() for c in out.splitlines()[-1].strip("|").split("|")]
+        self.assertEqual(cells[headers.index(self.HEADER)], "1.47")
+
+    def test_the_key_explains_the_measure_and_its_neutral_point(self):
+        key = screener.render_key("LEADER")
+        self.assertIn("Up/Down Volume Ratio", key)
+        self.assertIn("up-closes", key)
+        self.assertIn("down-closes", key)
+        self.assertIn("50 sessions", key)
+        self.assertIn("1.0", key)
 
 
 class TestTable(unittest.TestCase):

@@ -141,10 +141,15 @@ FULL_EVIDENCE = {"pct_from_high": 3.1, "contraction": 0.55, "pos_in_base": 0.82,
 
 def scan_row(sym, sector="Information Technology", matched=("LEADER",),
              verdict="HALF SIZE", rr=2.0, total=6.5, price=100.0,
-             illiquid=False):
+             illiquid=False, ud_ratio=1.47):
+    """A scan() row. Each matched entry carries `ud_ratio` at the top level
+    beside `fit` and `evidence`, which is setups.evaluate's contract and what
+    build_result_row reads -- the report cannot be rendered from an entry
+    without it."""
     return {"symbol": sym, "sector": sector, "rs": {"1m": 1.0, "3m": 2.0},
             "illiquid": illiquid,
-            "matched": {n: {"fit": 8.0, "evidence": dict(FULL_EVIDENCE)}
+            "matched": {n: {"fit": 8.0, "evidence": dict(FULL_EVIDENCE),
+                            "ud_ratio": ud_ratio}
                         for n in matched},
             "o": {"price": price, "score": {"total": total, "verdict": verdict},
                   "entry_gate": {"rr_at_current_price": rr},

@@ -71,6 +71,15 @@ like any other confluence.
 retraced to the 20- or 50-day average at the same time. The engine asserts this; if you
 ever see it reported, it is a predicate bug, not a rare event.
 
+**Each setup carries its own volume test, chosen for its stage.** COILED asks for at least
+one prior up-thrust in ~126 sessions — a base nobody ever bought is a dead stock, not a
+spring. BREAKOUT is not gated further; its 1.5-2.0x breakout-bar volume already is the
+evidence. LEADER and TURN require the up/down volume ratio at 1.25 or better (1.50 strict).
+PULLBACK requires the retracement to trade on no more than 0.90x the volume of the advance
+it retraces (0.75 strict). TURN is deliberately **not** gated on volume expansion since the
+golden cross — that measure decays with the age of the cross, so it would penalise an older
+cross rather than weak demand. If asked why, say so; it looks like an omission otherwise.
+
 **PULLBACK waits for the turn, not just the dip.** A match is a name at least 3% below a
 recent swing high (5% strict) whose last bar — or the one before it — reached a support
 level, closed back above that same level, and closed in the top half of its own range
@@ -82,8 +91,8 @@ gate working, not a thin tape.
 
 1. **Scan header** — date, universe, counts, FAILED list, per-setup match counts.
 2. **One table per chosen setup**, ranked. Full-word column headers, always including
-   `Sector` and `Score Now (catalyst-neutral)`. Include `showing top N of M` whenever the
-   list was truncated.
+   `Sector`, `Score Now (catalyst-neutral)` and `Up/Down Volume Ratio`. Include
+   `showing top N of M` whenever the list was truncated.
 3. **The key**, after every table. Never drop it — a narrower table is harder to read,
    not faster.
 4. **Breadth read** — two or three sentences on what the match counts and sector
@@ -123,11 +132,15 @@ python3 <skill-dir>/screener.py --setup all --csv log.csv --append   # keep a hi
   one table. `--json` and `--csv` are independent and may be used together; the "wrote N
   rows" notice goes to stderr so JSON on stdout stays parseable.
 
-The 26 columns, in order: `scan_date`, `last_closed_bar`, `universe`, `mode`, `symbol`,
+The 27 columns, in order: `scan_date`, `last_closed_bar`, `universe`, `mode`, `symbol`,
 `sector`, `setup`, `rank`, `setup_fit`, `score_now`, `score_at_trigger`, `risk_reward`,
-`vetoed`, `action`, `price`, `trigger_price`, `stop`, `rs_1m`, `rs_3m`, `setups_matched`,
-`match_count`, `evidence_1_label`, `evidence_1_value`, `evidence_2_label`,
-`evidence_2_value`, `flags`.
+`vetoed`, `action`, `price`, `trigger_price`, `stop`, `rs_1m`, `rs_3m`, `ud_ratio`,
+`setups_matched`, `match_count`, `evidence_1_label`, `evidence_1_value`,
+`evidence_2_label`, `evidence_2_value`, `flags`.
+
+`ud_ratio` is the up/down volume ratio, on every row including CONFLUENCE — a per-symbol
+metric like `rs_3m`, not an evidence slot, so it sits with them rather than in the
+setup-specific pair. An unmeasurable ratio is an empty cell, never a `1.00`.
 
 `mode` records `strict` or `loosened`, so two files from different threshold settings can
 never be silently concatenated as one scan.
@@ -155,6 +168,18 @@ the key, the FAILED list, or the breadth read.
 - **Volume-light breakouts are marked.** `stock_analyser` defines a trigger as a close
   plus 2x average volume; the screener surfaces 1.5-2.0x as near-misses and flags them.
   Reporting one as a confirmed breakout contradicts the framework beneath this skill.
+- **An `Up/Down Volume Ratio` below 1.0 means the price chart and the volume disagree.**
+  More money moved the stock down than up over the last 50 sessions, on a name that still
+  cleared every price condition its setup asks for. Only COILED, BREAKOUT and PULLBACK can
+  print it — LEADER and TURN gate above it — and on those it is the one fact the setup did
+  not test, so call it out in the write-up rather than letting the row pass unremarked. It
+  is not automatically disqualifying: a coil is meant to be quiet and a pullback is meant
+  to be sold. A `-` means the ratio could not be measured; it is not a 1.00.
+- **An empty screen in a falling market may be the threshold, not the market.** The volume
+  floors are absolute numbers rather than percentiles of the day's universe, so in a broad
+  selloff they can reject nearly everything. If the rejection funnel shows most names dying
+  at a volume gate, say that the threshold no longer suits the regime — which is a
+  different finding from "no setups exist", and the reader must not confuse the two.
 
 ## Common mistakes
 
@@ -173,3 +198,6 @@ the key, the FAILED list, or the breadth read.
 | Expecting `--top` to change the CSV | It governs the terminal only; the file's own cap is 20 per setup |
 | Reading a short PULLBACK list as a data problem | It waits for a reversal at support; most dips do not have one |
 | Appending scans with different `--strict` settings and reading them as one | The `mode` column is there to keep them apart |
+| Reporting a sub-1.0 `Up/Down Volume Ratio` without comment | The price chart and the volume disagree, and only the reader can weigh that |
+| Reading a `-` in the ratio column as a neutral 1.00 | It means the ratio could not be measured at all |
+| Calling an empty selloff screen "no setups exist" | The absolute volume floors may simply no longer suit the regime |

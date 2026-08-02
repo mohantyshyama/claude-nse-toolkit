@@ -9,7 +9,7 @@ from fixtures import bar, trend_series
 
 
 def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000,
-           down_spread=2.0):
+           down_spread=2.0, pause_at=-8):
     """The same V used in the TURN tests: the 50D crosses back above the 200D
     exactly 59 bars into the recovery, so vshape(200, 74) puts a golden cross
     15 bars ago and makes the whole rig match TURN as well as BREAKOUT.
@@ -29,6 +29,21 @@ def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000,
     parameter, so the golden-cross date, the liquidity gate, the base high a
     breakout has to clear and the base widths COILED measures are all exactly
     what they were. TestVshapeVolatility pins both of those claims.
+
+    `pause_at` swaps two adjacent closes near the end so the advance prints one
+    DOWN close. Without it every bar in the last 50 closes up, ud_ratio has no
+    denominator, and LEADER and TURN both reject this rig on their volume gate
+    for a reason the fixture never meant to express -- the exact blind spot a
+    monotonic series creates.
+
+    A SWAP, not an inserted dip, because a swap is invisible to almost
+    everything else the rig is asked to be: the multiset of closes is unchanged,
+    so the median turnover the liquidity gate reads is identical to the bit
+    (TestEvaluateLiquidityGate pins it at 2.985 crore); and every moving-average
+    window containing BOTH bars sums to exactly what it did before, so only a
+    window beginning between them differs -- one SMA value, mid-recovery,
+    nowhere near the cross. Highs and lows travel with their closes, so the bars
+    stay well formed and the base high a breakout must clear is unmoved.
     """
     rows, c = [], top
     for _ in range(down_n):
@@ -37,11 +52,24 @@ def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000,
     for _ in range(up_n):
         c += up_step
         rows.append(bar(len(rows), c, c + 1, c - 1, c, vol))
+    if pause_at is not None and len(rows) > abs(pause_at):
+        rows[pause_at]["c"], rows[pause_at + 1]["c"] = \
+            rows[pause_at + 1]["c"], rows[pause_at]["c"]
+        for r in (rows[pause_at], rows[pause_at + 1]):
+            r["h"], r["l"] = r["c"] + 1, r["c"] - 1
     return rows
 
 
-def m(fit):
-    return {"fit": fit, "evidence": {}}
+def m(fit, ud=None):
+    """A matched entry shaped the way evaluate() builds one.
+
+    That includes the TOP-LEVEL ud_ratio beside fit, not only the copy inside
+    evidence: _add_confluence reads the top-level key, and a helper that omitted
+    it would let these unit tests pass against a contract the real caller
+    violates.
+    """
+    return {"fit": fit, "ud_ratio": ud,
+            "evidence": {} if ud is None else {"ud_ratio": ud}}
 
 
 def stub_match(ev):
@@ -74,6 +102,34 @@ class TestConfluence(unittest.TestCase):
         self.assertAlmostEqual(out["CONFLUENCE"]["fit"], 7.0, places=6)
         self.assertEqual(out["CONFLUENCE"]["evidence"]["matched"], ["COILED", "LEADER"])
         self.assertEqual(out["CONFLUENCE"]["evidence"]["count"], 2)
+
+    def test_confluence_carries_the_up_down_ratio_of_its_constituents(self):
+        """The report prints a ud_ratio column for CONFLUENCE too, so the
+        evidence has to carry one. It is a property of the SYMBOL, so every
+        constituent holds the identical number and copying the first is not a
+        choice between disagreeing values."""
+        out = setups._add_confluence({"COILED": m(8.0, ud=1.42),
+                                      "LEADER": m(6.0, ud=1.42)})
+        self.assertAlmostEqual(out["CONFLUENCE"]["evidence"]["ud_ratio"], 1.42,
+                               places=6)
+
+    def test_confluence_ratio_is_copied_not_recomputed_or_averaged(self):
+        """A CONFLUENCE row disagreeing with the rows it is made of would be
+        worse than no column. The mean fit IS averaged; the ratio is not."""
+        out = setups._add_confluence({"COILED": m(8.0, ud=2.0),
+                                      "LEADER": m(6.0, ud=2.0)})
+        self.assertAlmostEqual(out["CONFLUENCE"]["evidence"]["ud_ratio"], 2.0,
+                               places=6)
+        self.assertAlmostEqual(out["CONFLUENCE"]["evidence"]["mean_fit"], 7.0,
+                               places=6)
+
+    def test_an_unmeasurable_ratio_survives_into_confluence_as_none(self):
+        """None must not become 1.0 or vanish on the way up: the column prints
+        a dash for it, and a silent default would print a confident number for a
+        name whose ratio could not be formed."""
+        out = setups._add_confluence({"COILED": m(8.0), "LEADER": m(6.0)})
+        self.assertIn("ud_ratio", out["CONFLUENCE"]["evidence"])
+        self.assertIsNone(out["CONFLUENCE"]["evidence"]["ud_ratio"])
 
     def test_confluence_fit_is_the_mean_not_the_max_or_the_sum(self):
         """8.0 and 6.0 average to 7.0, but so does nothing else plausible --
@@ -568,7 +624,9 @@ class TestEvaluate(unittest.TestCase):
     def test_each_entry_carries_a_fit_and_the_predicate_evidence(self):
         out = setups.evaluate(self.rig.scored(), self.rs)
         for name in ("BREAKOUT", "LEADER", "TURN"):
-            self.assertEqual(set(out[name]), {"fit", "evidence"})
+            # ud_ratio is part of the entry shape, not an extra: the renderer
+            # reads it off every match without consulting evidence.
+            self.assertEqual(set(out[name]), {"fit", "evidence", "ud_ratio"})
             self.assertTrue(0.0 <= out[name]["fit"] <= 10.0)
             self.assertTrue(out[name]["evidence"])
         self.assertIn("vol_mult", out["BREAKOUT"]["evidence"])
@@ -646,7 +704,12 @@ class TestEvaluate(unittest.TestCase):
                      TURN=(stub_match(None), lambda ev: 0.0))
         out = setups.evaluate(self.rig.scored(), self.rs)
         self.assertEqual(list(out), ["COILED"])
-        self.assertEqual(out["COILED"], {"fit": 4.0, "evidence": {}})
+        # ud_ratio still rides along even though this stub's evidence is empty:
+        # it is read from ctx, so it does not depend on the predicate's payload.
+        self.assertEqual(
+            out["COILED"],
+            {"fit": 4.0, "evidence": {},
+             "ud_ratio": setups.ud_ratio(self.rig.rows, setups.UD_BARS)})
 
     def test_setups_not_the_registry_decides_what_the_screen_reports(self):
         """evaluate() walks SETUPS. A registry entry with no place in the
@@ -932,12 +995,13 @@ class TestEvaluateContract(unittest.TestCase):
                              "rs_1m_floor", "pos_in_base", "contractions",
                              "thrust_bars", "sma50_rising", "strict_ma_stack",
                              "swing_margin_atr", "min_retrace_pct",
-                             "close_position"}
+                             "close_position", "up_thrusts", "ud_ratio"}
         tighter_is_lower = {"atr_pctile", "max_extension_pct", "dryup",
                             "max_from_high_pct", "rsi_hi", "ma_dist_pct",
                             "atr_mult_to_support", "cross_bars",
                             "atr_pctile_hi", "max_run_pct",
-                            "support_tol_atr", "reversal_bars"}
+                            "support_tol_atr", "reversal_bars",
+                            "pullback_vol_ratio"}
         seen = set()
         for name, keys in setups.THRESHOLDS.items():
             for key, (lo, st) in keys.items():
@@ -999,6 +1063,89 @@ class TestStrictNestsAcrossPredicates(unittest.TestCase):
                                 "lo52=%s dryup=%s rs=%s"
                                 % (name, rsi_val, lo52, dryup, rs))
         self.assertGreater(checked, 0, "grid produced no strict matches at all")
+
+
+class TestUdRatioRidesOnEveryMatchedEntry(unittest.TestCase):
+    """The interface contract: ``matched[setup]["ud_ratio"]``, at the TOP level.
+
+    A renderer prints this figure for every table including CONFLUENCE, whose
+    two evidence slots are already spoken for by the matched label and the mean
+    fit. Reading the number out of ``evidence`` therefore cannot serve
+    CONFLUENCE at all, which is why the key rides beside ``fit`` rather than
+    inside whichever payload a predicate happened to build.
+    """
+
+    def setUp(self):
+        self.rig = Rig()
+        self.rig.seed()
+        self.rs = {"1m": 8.0, "3m": 14.0}
+
+    def tearDown(self):
+        self.rig.clear()
+
+    def test_every_entry_including_confluence_carries_the_key(self):
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        self.assertIn("CONFLUENCE", m,
+                      "the rig stopped matching two setups, so the CONFLUENCE "
+                      "arm of this contract is no longer exercised")
+        for name, hit in m.items():
+            self.assertIn("ud_ratio", hit, name)
+
+    def test_the_value_is_the_symbols_own_measured_ratio(self):
+        """Pinned to what ud_ratio() returns for these very rows, so a constant,
+        a copy of fit, or a different ctx key all fail."""
+        expected = setups.ud_ratio(self.rig.rows, setups.UD_BARS)
+        self.assertIsNotNone(expected)
+        # A fixture sitting at 1.0 or at the fit value could not tell a real
+        # read from a hardcoded one.
+        self.assertNotEqual(expected, 1.0)
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        for name, hit in m.items():
+            self.assertEqual(hit["ud_ratio"], expected, name)
+            self.assertNotEqual(hit["fit"], expected, name)
+
+    def test_the_key_comes_from_ctx_and_not_from_the_predicates_evidence(self):
+        """A predicate whose evidence omits ud_ratio must STILL get the key.
+
+        This is what makes the contract independent of five separate payload
+        dicts. An `evidence.get("ud_ratio")` implementation hands back None here
+        and dies; reading ctx once cannot.
+        """
+        expected = setups.ud_ratio(self.rig.rows, setups.UD_BARS)
+        orig = setups.REGISTRY["COILED"]
+        setups.REGISTRY["COILED"] = (
+            lambda o, ctx, strict, diag: {"contraction": 0.5, "pos_in_base": 0.9,
+                                          "dryup": 0.6},
+            lambda ev: 5.0)
+        try:
+            m = setups.evaluate(self.rig.scored(), self.rs)
+        finally:
+            setups.REGISTRY["COILED"] = orig
+        self.assertNotIn("ud_ratio", m["COILED"]["evidence"])
+        self.assertEqual(m["COILED"]["ud_ratio"], expected)
+
+    def test_confluence_carries_none_through_rather_than_dropping_the_key(self):
+        """None means unmeasurable and must REACH the renderer as None.
+
+        An implementation that only set the key when it had a number would drop
+        it here, and the renderer would raise on exactly the names that need a
+        dash printed.
+        """
+        matched = {
+            "COILED": {"fit": 7.0, "evidence": {"ud_ratio": None}, "ud_ratio": None},
+            "LEADER": {"fit": 8.0, "evidence": {"ud_ratio": None}, "ud_ratio": None}}
+        out = setups._add_confluence(matched)
+        self.assertIn("ud_ratio", out["CONFLUENCE"])
+        self.assertIsNone(out["CONFLUENCE"]["ud_ratio"])
+
+    def test_confluence_reports_the_same_number_as_its_constituents(self):
+        """Distinct from every fit in the rig, so copying a fit up fails."""
+        matched = {
+            "COILED": {"fit": 7.0, "evidence": {"ud_ratio": 2.5}, "ud_ratio": 2.5},
+            "LEADER": {"fit": 8.0, "evidence": {"ud_ratio": 2.5}, "ud_ratio": 2.5}}
+        out = setups._add_confluence(matched)
+        self.assertEqual(out["CONFLUENCE"]["ud_ratio"], 2.5)
+        self.assertEqual(out["CONFLUENCE"]["evidence"]["ud_ratio"], 2.5)
 
 
 if __name__ == "__main__":

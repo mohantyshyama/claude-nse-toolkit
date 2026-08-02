@@ -26,7 +26,7 @@ EXPECTED_COLUMNS = [
     "setup", "rank", "setup_fit",
     "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
     "price", "trigger_price", "stop",
-    "rs_1m", "rs_3m",
+    "rs_1m", "rs_3m", "ud_ratio",
     "setups_matched", "match_count",
     "evidence_1_label", "evidence_1_value",
     "evidence_2_label", "evidence_2_value",
@@ -47,6 +47,7 @@ def result(symbol="TCS", **over):
          "price": 200.0, "fit": 8.1, "evidence": dict(LEADER_EV),
          "total": 6.2, "trigger_total": 7.0, "trigger_price": 210.0,
          "stop": 185.0, "rr": 2.4, "rs_1m": 3.0, "rs_3m": 11.0,
+         "ud_ratio": 1.472,
          "vetoed": False, "action": "ALERT", "match_count": 1}
     r.update(over)
     return r
@@ -97,10 +98,91 @@ def chdir(path):
 
 # --------------------------------------------------------------------- schema
 
+class TestUpDownRatioColumn(unittest.TestCase):
+    """The CSV half of the dedicated up/down volume column."""
+
+    def test_the_value_is_written_for_every_setup_including_confluence(self):
+        """A DIFFERENT ratio per setup row: one value repeated down the column
+        would pass just as well if build_rows wrote a constant, or read the
+        ratio off the first row and reused it for the rest."""
+        rows = build([scanned(matched=("COILED", "LEADER"))],
+                     {"COILED": [result(ud_ratio=1.11)],
+                      "LEADER": [result(ud_ratio=2.22)],
+                      "CONFLUENCE": [result(ud_ratio=3.33,
+                                            evidence={"count": 2,
+                                                      "label": "COILED+LEADER",
+                                                      "mean_fit": 8.0,
+                                                      "matched": ["COILED",
+                                                                  "LEADER"]})]},
+                     ["COILED", "LEADER", "CONFLUENCE"])
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({r["setup"]: r["ud_ratio"] for r in rows},
+                         {"COILED": 1.11, "LEADER": 2.22, "CONFLUENCE": 3.33})
+
+    def test_it_is_the_raw_ratio_not_a_formatted_string(self):
+        """House rule for this file: raw sortable numbers, never `"1.47x"`."""
+        r = build([scanned()], {"LEADER": [result()]}, ["LEADER"])[0]
+        self.assertIsInstance(r["ud_ratio"], float)
+
+    def test_it_is_rounded_to_two_places_like_the_terminal_column(self):
+        """Two places, not three: the ratio is built from 50 bars of volume and
+        the third decimal is noise the input cannot support. It is also what the
+        terminal prints, and the file and the screen must not show a reader two
+        different numbers for one measurement. The asserts below fail on a
+        four-place, a three-place and a whole-number rounding alike."""
+        r = build([scanned()], {"LEADER": [result(ud_ratio=1.4728394)]},
+                  ["LEADER"])[0]
+        self.assertEqual(r["ud_ratio"], 1.47)
+        with tmpdir() as d:
+            path = os.path.join(d, "s.csv")
+            csv_export.write_csv(path, [r])
+            self.assertEqual(read_back(path)[0]["ud_ratio"], "1.47")
+
+    def test_a_row_without_the_key_raises_rather_than_writing_a_blank(self):
+        """The sibling arm of the None case. None is a ratio that could not be
+        formed and is a blank cell honestly; a MISSING key is a caller that
+        never built the row build_result_row promises, and `.get` would blank
+        the whole column instead -- indistinguishable, in the file, from a
+        universe with no volume data."""
+        r = result()
+        del r["ud_ratio"]
+        with self.assertRaises(KeyError):
+            build([scanned()], {"LEADER": [r]}, ["LEADER"])
+
+    def test_an_unmeasurable_ratio_is_an_empty_cell_not_a_neutral_one(self):
+        """None means the stock had no down-closes. Writing 1.0 would state a
+        measurement that was never made, and it would sort among real values."""
+        rows = build([scanned()], {"LEADER": [result(ud_ratio=None)]}, ["LEADER"])
+        self.assertEqual(rows[0]["ud_ratio"], "")
+        with tmpdir() as d:
+            path = os.path.join(d, "s.csv")
+            csv_export.write_csv(path, rows)
+            self.assertEqual(read_back(path)[0]["ud_ratio"], "")
+
+    def test_a_measured_zero_is_written_as_zero_not_left_blank(self):
+        """0.0 is a measured finding -- no up-volume at all -- and must be
+        distinguishable from a missing one. `if v is None`, never `if not v`."""
+        rows = build([scanned()], {"LEADER": [result(ud_ratio=0.0)]}, ["LEADER"])
+        self.assertEqual(rows[0]["ud_ratio"], 0.0)
+        with tmpdir() as d:
+            path = os.path.join(d, "s.csv")
+            csv_export.write_csv(path, rows)
+            self.assertEqual(read_back(path)[0]["ud_ratio"], "0.0")
+
+
 class TestSchema(unittest.TestCase):
-    def test_columns_are_the_agreed_twenty_six_in_order(self):
+    def test_columns_are_the_agreed_twenty_seven_in_order(self):
         self.assertEqual(csv_export.COLUMNS, EXPECTED_COLUMNS)
-        self.assertEqual(len(csv_export.COLUMNS), 26)
+        self.assertEqual(len(csv_export.COLUMNS), 27)
+
+    def test_the_up_down_ratio_sits_beside_relative_strength(self):
+        """A universal metric, not an evidence slot: it means the same thing on
+        every row of every setup, so it lives with rs_1m/rs_3m and risk_reward
+        rather than in the per-setup evidence pair."""
+        cols = csv_export.COLUMNS
+        self.assertEqual(cols[cols.index("rs_3m") + 1], "ud_ratio")
+        self.assertNotIn("ud_ratio", [k for pair in csv_export.EVIDENCE.values()
+                                      for k, _ in pair])
 
     def test_no_column_name_is_repeated(self):
         self.assertEqual(len(set(csv_export.COLUMNS)), len(csv_export.COLUMNS))
@@ -780,9 +862,14 @@ class TestCsvArgs(unittest.TestCase):
 def scan_row(symbol, sector="Information Technology", total=6.2,
              verdict="HALF SIZE", matched=None, rs=(3.0, 11.0), price=200.0,
              rr=2.4, atr=10.0):
-    """A scan() row complete enough for build_result_row and the renderers."""
+    """A scan() row complete enough for build_result_row and the renderers.
+
+    Every matched entry carries `ud_ratio` at the top level beside `fit` and
+    `evidence` -- setups.evaluate's contract, and the key build_result_row
+    reads. A caller passing its own `matched` has to carry it too."""
     if matched is None:
-        matched = {"LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)}}
+        matched = {"LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
+                              "ud_ratio": 1.47}}
     return {"symbol": symbol, "sector": sector, "illiquid": False, "diag": {},
             "rs": {"1m": rs[0], "3m": rs[1]}, "matched": matched,
             "o": {"price": price, "score": {"total": total, "verdict": verdict},
@@ -901,8 +988,12 @@ class TestMainCsv(unittest.TestCase):
     def test_the_cap_is_applied_per_setup_not_to_the_whole_file(self):
         """Two setups over the cap write 40 rows, not 20."""
         rows = [scan_row("SYM%d" % i, total=9.0 - i * 0.1, matched={
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)}})
+            # A different ratio per symbol, the same on both of that symbol's
+            # setups: it is a property of the name, not of the match.
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
+                       "ud_ratio": 1.0 + i / 100.0},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
+                       "ud_ratio": 1.0 + i / 100.0}})
             for i in range(25)]
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
@@ -936,8 +1027,10 @@ class TestMainCsv(unittest.TestCase):
 
     def test_setup_filter_reaches_the_file(self):
         rows = [scan_row("A", matched={
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)}})]
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
+                       "ud_ratio": 1.47},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
+                       "ud_ratio": 1.47}})]
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "coiled", "--csv", path], rows)
@@ -1016,9 +1109,15 @@ class TestMainCsv(unittest.TestCase):
 
     def test_confluence_rows_reach_the_file_with_blank_evidence(self):
         rows = [scan_row("A", matched={
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)},
-            "CONFLUENCE": {"fit": 7.5,
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
+                       "ud_ratio": 1.47},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
+                       "ud_ratio": 1.47},
+            # CONFLUENCE carries the same top-level key as its constituents,
+            # which is the whole reason the ratio does not live in the evidence:
+            # this entry's two evidence slots are the matched label and the mean
+            # fit, and there is no third one to put it in.
+            "CONFLUENCE": {"fit": 7.5, "ud_ratio": 1.47,
                            "evidence": {"matched": ["COILED", "LEADER"],
                                         "count": 2,
                                         "label": "COILED+LEADER",

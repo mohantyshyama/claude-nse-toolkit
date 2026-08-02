@@ -6,7 +6,26 @@ sys.path.insert(0, _here)
 import setups
 from fixtures import trend_series
 
-ROWS = trend_series(120)
+# The advance trades at ADVANCE_VOL and the retracement at half of it, so the
+# pullback-volume gate reads ~0.5 and clears the loosened 0.90 ceiling and the
+# strict 0.75 one alike. Every pre-existing case in this file therefore still
+# turns on the condition it was written for; the gate itself is probed by
+# TestPullbackVolumeAgainstTheAdvance, which sets the two legs deliberately.
+#
+# The light tail starts at ROWS[-9], which is the bar swings() dates the HIGHER
+# of its two pivots on -- the pivot _retrace_swing picks and the bar the
+# retracement leg therefore begins at. A tail measured from anywhere else would
+# leave advance bars inside the pullback leg or the reverse, and the ratio would
+# stop meaning what the gate says it means.
+ADVANCE_VOL = 1_000_000
+PULLBACK_VOL = 500_000
+#: The volume on the reversal bar rows_for() substitutes for the last one. Named
+#: rather than inlined because it lands INSIDE the retracement leg and so is a
+#: term in every pullback-volume expectation in this file.
+REVERSAL_VOL = 1_000_000
+ROWS = trend_series(120, vol=ADVANCE_VOL)
+for _bar in ROWS[-9:]:
+    _bar["v"] = PULLBACK_VOL
 
 
 def result(**over):
@@ -73,8 +92,12 @@ def far_from_ma(support, atr=2.5, price=103.5):
                   entry_gate=gate(support=support))
 
 
+# ud_ratio 1.60 bands to 8 on the shared accumulation ladder -- mid-rung, so a
+# dropped term is visible. PULLBACK does not GATE on this ratio (it gates on the
+# retracement's volume against the advance's), so the value only reaches the Fit.
 CTX = {"rows": ROWS, "rs": {"1m": -1.0, "3m": 4.0},
-       "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True}
+       "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
+       "ud_ratio": 1.60}
 FALLING = dict(CTX, sma200_rising=False)
 
 
@@ -99,7 +122,7 @@ def clean_reversal_bar(o):
     low = max(levels) - 0.01
     reach = px - low
     return {"o": px - reach * 0.5, "h": px + reach / 3.0, "l": low, "c": px,
-            "v": 1_000_000}
+            "v": REVERSAL_VOL}
 
 
 def rows_for(o):
@@ -170,7 +193,39 @@ class TestPullbackMatches(unittest.TestCase):
         ev = pull(result(), CTX)
         self.assertEqual(set(ev), {"dist_to_ma_pct", "rsi", "dryup",
                                    "close_position", "retrace_pct",
+                                   "pullback_vol_ratio", "ud_ratio",
                                    "retrace_of_52w_range_pct"})
+        self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
+        # The nine-bar retracement leg is eight tail bars at PULLBACK_VOL plus
+        # the clean reversal bar rows_for() substitutes in, which carries
+        # REVERSAL_VOL of its own; the thirty-bar advance is all ADVANCE_VOL.
+        # Spelled out rather than written as 0.5, because the substituted bar is
+        # exactly the sort of detail a rounded literal would bury.
+        self.assertAlmostEqual(
+            ev["pullback_vol_ratio"],
+            (8 * PULLBACK_VOL + REVERSAL_VOL) / 9 / ADVANCE_VOL, places=6)
+
+    def test_an_unmeasurable_ratio_reaches_the_evidence_as_none(self):
+        """PULLBACK gates on the retracement's volume against the advance's, NOT
+        on the up/down ratio, so a name whose up/down ratio cannot be formed
+        still matches and its None travels into the evidence -- and from there
+        into the report's Up/Down Volume Ratio column, which prints a dash.
+
+        `ctx.get("ud_ratio") or 1.0` would print a confident "1.00" instead.
+        """
+        ev = pull(result(), dict(CTX, ud_ratio=None))
+        self.assertIsNotNone(ev)
+        self.assertIsNone(ev["ud_ratio"])
+        self.assertAlmostEqual(setups.fit_pullback(ev),
+                               setups.fit_pullback(dict(ev, ud_ratio=0.5)),
+                               places=6)
+
+    def test_a_measured_zero_reaches_the_evidence_as_zero(self):
+        """0.0 is measured, not missing: a name with no up-volume at all. It
+        must not be reported as a neutral 1.0."""
+        ev = pull(result(), dict(CTX, ud_ratio=0.0))
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["ud_ratio"], 0.0)
         self.assertAlmostEqual(ev["rsi"], 48.0, places=6)
         self.assertAlmostEqual(ev["dryup"], 0.8, places=6)
 
@@ -482,8 +537,14 @@ class TestPullbackSupportArmNeedsRoomBelowASwingHigh(unittest.TestCase):
                                                              swing_highs=[]), CTX))
 
     def test_swing_entries_without_a_price_are_skipped_not_crashed_on(self):
-        o = self.at_high(103.5, swing_highs=[{"date": "2026-01-01", "px": None},
-                                             {"date": "2026-02-01", "px": 110.0}])
+        """The priced pivot is dated through swings() rather than written out,
+        because the volume gate measures its two legs FROM that pivot: a pivot
+        dated in January puts eleven weeks of the advance inside the pullback
+        leg and the name is rejected on volume, which would make this test pass
+        or fail on something it is not about."""
+        o = self.at_high(103.5,
+                         swing_highs=[{"date": "2026-01-01", "px": None}]
+                                     + swings(110.0))
         self.assertIsNotNone(pull(o, CTX))
 
     def test_the_rejection_names_the_swing_high_condition(self):
@@ -987,7 +1048,12 @@ class TestPullbackStrict(unittest.TestCase):
 
 class TestPullbackFit(unittest.TestCase):
     def ev(self, **over):
+        # `dryup` is deliberately still here and deliberately NOT scored: it is
+        # a live gate, so a real match carries it, and leaving it in the fixture
+        # means a fit_pullback that went back to reading it would be caught by
+        # the weights test rather than by a KeyError that looks like a typo.
         e = {"dist_to_ma_pct": 0.5, "rsi": 48.0, "dryup": 0.8,
+             "pullback_vol_ratio": 0.45, "ud_ratio": 1.60,
              "retrace_of_52w_range_pct": 30.0}
         e.update(over)
         return e
@@ -1002,9 +1068,9 @@ class TestPullbackFit(unittest.TestCase):
         keys are floats in the same dict.
         """
         e = self.ev(retrace_of_52w_range_pct=30.0, retrace_pct=6.0)
-        self.assertAlmostEqual(setups.fit_pullback(e), 10.0, places=6)
+        self.assertAlmostEqual(setups.fit_pullback(e), 9.8, places=6)
         self.assertAlmostEqual(
-            setups.fit_pullback(dict(e, retrace_of_52w_range_pct=6.0)), 8.6,
+            setups.fit_pullback(dict(e, retrace_of_52w_range_pct=6.0)), 8.75,
             places=6)
 
     def test_closer_to_the_moving_average_scores_higher(self):
@@ -1023,36 +1089,58 @@ class TestPullbackFit(unittest.TestCase):
         self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=58.0)),
                                setups.fit_pullback(self.ev(rsi=42.0)), places=6)
 
-    def test_deeper_dryup_scores_higher(self):
-        self.assertGreater(setups.fit_pullback(self.ev(dryup=0.7)),
-                           setups.fit_pullback(self.ev(dryup=1.05)))
+    def test_a_quieter_retracement_scores_higher(self):
+        """The replacement for the old dry-up ordering test. The term measures
+        the retracement's volume against the advance's, so lower is better."""
+        self.assertGreater(setups.fit_pullback(self.ev(pullback_vol_ratio=0.45)),
+                           setups.fit_pullback(self.ev(pullback_vol_ratio=0.88)))
 
-    def test_weights_are_thirty_five_twenty_five_twenty_twenty(self):
-        """dist 0.5 -> 10, |rsi-50| = 2 -> 10, dryup 0.8 -> 10, retrace 30 -> 10.
-        0.35*10 + 0.25*10 + 0.20*10 + 0.20*10 = 10.0. The second case moves one
-        term at a time so the individual weights, not just their sum, are
-        pinned: dist 2.5 -> 6 costs 0.35*4 = 1.4, giving 8.6.
+    def test_the_blunt_dryup_term_is_no_longer_scored(self):
+        """dryup was REPLACED, not merely outweighed.
+
+        It compares a 20-day average against a 50-day one -- a statement about
+        the last month that knows nothing about where the pullback began -- and
+        scoring it alongside the pullback-versus-advance ratio would price one
+        idea twice and give the worse measurement half the credit. Moving it
+        across its entire band must now change nothing at all.
         """
-        self.assertAlmostEqual(setups.fit_pullback(self.ev()), 10.0, places=6)
+        for dry in (0.5, 0.8, 0.95, 1.09):
+            self.assertAlmostEqual(setups.fit_pullback(self.ev(dryup=dry)),
+                                   setups.fit_pullback(self.ev()), places=6,
+                                   msg="dryup %s" % dry)
+
+    def test_weights_are_thirty_twenty_twenty_five_fifteen_ten(self):
+        """dist 0.5 -> 10, |rsi-50| = 2 -> 10, pullback volume 0.45 -> 10,
+        retrace 30 -> 10, accumulation 1.60 -> 8.
+        0.30*10 + 0.20*10 + 0.25*10 + 0.15*10 + 0.10*8
+          = 3.0 + 2.0 + 2.5 + 1.5 + 0.8 = 9.8.
+        Each further case moves ONE term, so the individual weights and not just
+        their sum are pinned: dist 2.5 -> 6 costs 0.30*4 = 1.2, giving 8.6.
+        """
+        self.assertAlmostEqual(setups.fit_pullback(self.ev()), 9.8, places=6)
         self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=2.5)), 8.6,
                                places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=62.0)), 8.75,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=62.0)), 8.8,
                                places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(dryup=0.9)), 9.6,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(pullback_vol_ratio=0.9)),
+                               8.3, places=6)
+        # 60% of the 52-week range is PAST the 55 boundary, so depth falls to
+        # the 4 rung rather than the 7 one: 0.15 * 6 = 0.9 off.
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=60.0)), 8.9,
                                places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=60.0)), 8.8,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=0.80)), 9.2,
                                places=6)
 
     def test_every_distance_cut_is_reachable(self):
         cuts = [(1.0, 10), (2.0, 8), (3.0, 6)]
         for i, (dist, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=dist)),
-                                   round(0.35 * sub + 6.5, 2), places=6,
+                                   round(0.30 * sub + 6.8, 2), places=6,
                                    msg="at cut %s" % dist)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(dist_to_ma_pct=dist + 0.001)),
-                round(0.35 * above + 6.5, 2), places=6,
+                round(0.30 * above + 6.8, 2), places=6,
                 msg="just above cut %s" % dist)
 
     def test_distance_falls_through_to_zero_for_a_support_only_match(self):
@@ -1060,30 +1148,59 @@ class TestPullbackFit(unittest.TestCase):
         other fits: a name that qualified via the support route can sit 10%
         from every average."""
         self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=10.1)),
-                               6.5, places=6)
+                               6.8, places=6)
 
     def test_every_rsi_cut_is_reachable(self):
         cuts = [(5.0, 10), (10.0, 8), (99.0, 5)]
         for i, (gap, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=50.0 + gap)),
-                                   round(3.5 + 0.25 * sub + 4.0, 2), places=6,
+                                   round(3.0 + 0.20 * sub + 4.8, 2), places=6,
                                    msg="at cut %s" % gap)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(rsi=50.0 + gap + 0.001)),
-                round(3.5 + 0.25 * above + 4.0, 2), places=6,
+                round(3.0 + 0.20 * above + 4.8, 2), places=6,
                 msg="just above cut %s" % gap)
 
-    def test_every_dryup_cut_is_reachable(self):
-        cuts = [(0.80, 10), (0.95, 8), (1.10, 5)]
-        for i, (dry, sub) in enumerate(cuts):
-            self.assertAlmostEqual(setups.fit_pullback(self.ev(dryup=dry)),
-                                   round(3.5 + 2.5 + 0.20 * sub + 2.0, 2), places=6,
-                                   msg="at cut %s" % dry)
+    def test_every_pullback_volume_cut_is_reachable(self):
+        """band_desc, so the paired case sits just ABOVE each cut. The 3.0 + 2.0
+        + 1.5 + 0.8 = 7.3 remainder is held fixed.
+
+        The 0.0 fall-through below the last cut is NOT reachable through
+        match_pullback -- its gate rejects anything above 0.90 -- so the final
+        pair asserts the guard rather than a live arm.
+        """
+        cuts = [(0.50, 10), (0.65, 8), (0.80, 6), (0.90, 4)]
+        for i, (pv, sub) in enumerate(cuts):
+            self.assertAlmostEqual(
+                setups.fit_pullback(self.ev(pullback_vol_ratio=pv)),
+                round(0.25 * sub + 7.3, 2), places=6, msg="at cut %s" % pv)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
-            self.assertAlmostEqual(setups.fit_pullback(self.ev(dryup=dry + 0.001)),
-                                   round(3.5 + 2.5 + 0.20 * above + 2.0, 2), places=6,
-                                   msg="just above cut %s" % dry)
+            self.assertAlmostEqual(
+                setups.fit_pullback(self.ev(pullback_vol_ratio=pv + 0.001)),
+                round(0.25 * above + 7.3, 2), places=6,
+                msg="just above cut %s" % pv)
+
+    def test_every_accumulation_cut_is_reachable(self):
+        """The shared ladder at PULLBACK's 10% weight -- the smallest of the
+        five, because this setup already spends 25% on a volume term of its own.
+        The 3.0 + 2.0 + 2.5 + 1.5 = 9.0 remainder is held fixed.
+
+        Every rung including the sub-1.00 floor is REACHABLE here: PULLBACK has
+        no up/down gate, so a name being distributed can still match and must
+        still be ranked below one that is not.
+        """
+        cuts = [(2.50, 10), (2.00, 9), (1.50, 8), (1.25, 6), (1.00, 4)]
+        for i, (ud, sub) in enumerate(cuts):
+            self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=ud)),
+                                   round(0.10 * sub + 9.0, 2), places=6,
+                                   msg="at cut %s" % ud)
+            below = cuts[i + 1][1] if i + 1 < len(cuts) else 2.0
+            self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=ud - 0.001)),
+                                   round(0.10 * below + 9.0, 2), places=6,
+                                   msg="just below cut %s" % ud)
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=None)),
+                               round(0.10 * 2.0 + 9.0, 2), places=6)
 
     def test_retrace_depth_ladder_has_six_reachable_arms(self):
         """The band falls away on BOTH sides of the 25-45 fib window now.
@@ -1098,7 +1215,7 @@ class TestPullbackFit(unittest.TestCase):
                          (38.2, 10), (45.0, 10), (45.01, 7), (55.0, 7),
                          (55.01, 4), (90.0, 4)]:
             self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=pct)),
-                                   round(8.0 + 0.20 * sub, 2), places=6,
+                                   round(8.3 + 0.15 * sub, 2), places=6,
                                    msg="retrace %s" % pct)
 
     def test_a_trivial_retracement_no_longer_scores_near_the_top(self):
@@ -1122,8 +1239,11 @@ class TestPullbackFit(unittest.TestCase):
         self.assertEqual(falling, sorted(falling, reverse=True))
 
     def test_fit_stays_inside_zero_to_ten(self):
-        worst = self.ev(dist_to_ma_pct=50.0, rsi=200.0, dryup=5.0,
-                        retrace_of_52w_range_pct=99.0)
+        # Every band at its fall-through except retrace depth, whose floor is
+        # 4, and accumulation, whose floor is 2:
+        # 0.15*4 + 0.10*2 = 0.6 + 0.2 = 0.8.
+        worst = self.ev(dist_to_ma_pct=50.0, rsi=200.0, pullback_vol_ratio=5.0,
+                        ud_ratio=0.5, retrace_of_52w_range_pct=99.0)
         self.assertAlmostEqual(setups.fit_pullback(worst), 0.8, places=6)
         self.assertTrue(0.0 <= setups.fit_pullback(worst) <= 10.0)
 
@@ -1138,7 +1258,8 @@ class TestPullbackThresholdTable(unittest.TestCase):
                           "close_position": (0.50, 0.60),
                           "reversal_bars": (2, 1),
                           "rsi_lo": (38.0, 40.0), "rsi_hi": (62.0, 58.0),
-                          "dryup": (1.1, 1.0), "thrust_bars": (8, 10)})
+                          "dryup": (1.1, 1.0), "thrust_bars": (8, 10),
+                          "pullback_vol_ratio": (0.90, 0.75)})
 
     def test_sma200_rising_is_absent_from_the_table(self):
         """It must not be parameterised: loosening it would not widen the
@@ -1148,7 +1269,7 @@ class TestPullbackThresholdTable(unittest.TestCase):
     def test_strict_is_never_looser_than_loosened(self):
         th = setups.THRESHOLDS["PULLBACK"]
         for key in ("ma_dist_pct", "atr_mult_to_support", "rsi_hi", "dryup",
-                    "support_tol_atr", "reversal_bars"):
+                    "support_tol_atr", "reversal_bars", "pullback_vol_ratio"):
             self.assertLessEqual(th[key][1], th[key][0], key)
         for key in ("rsi_lo", "thrust_bars", "swing_margin_atr",
                     "min_retrace_pct", "close_position"):
@@ -1157,7 +1278,7 @@ class TestPullbackThresholdTable(unittest.TestCase):
                                    "rsi_hi", "dryup", "support_tol_atr",
                                    "reversal_bars", "rsi_lo", "thrust_bars",
                                    "swing_margin_atr", "min_retrace_pct",
-                                   "close_position"},
+                                   "close_position", "pullback_vol_ratio"},
                          "a threshold was added without a direction")
 
     def test_anything_matching_strict_also_matches_loosened(self):
@@ -1201,6 +1322,198 @@ class TestPullbackThresholdTable(unittest.TestCase):
                             "strict matched but loosened did not: px=%s "
                             "highs=%s atr=%s" % (price, highs, atr_d))
         self.assertGreater(checked, 0, "grid produced no strict matches at all")
+
+
+#: The bar both volume legs are measured from. swings(104.0, 110.0) dates its
+#: HIGHER pivot on ROWS[-9], and _retrace_swing takes the highest of the last
+#: five pivots -- so the advance is the 30 bars before this index and the
+#: retracement is this bar to the end. TestPullbackVolumeLegs asserts it rather
+#: than trusting the arithmetic.
+PIVOT_INDEX = len(ROWS) - 9
+
+
+def legs(o, pullback_vol, advance_vol=ADVANCE_VOL, pivot=PIVOT_INDEX,
+         ctx=None):
+    """A ctx whose rows carry a chosen volume on each side of the pivot.
+
+    The rows are DEEP-copied: rows_for() shares its bar dicts with the module's
+    ROWS, and writing volumes through them would rewrite the fixture every other
+    test in this file depends on.
+    """
+    rows = [dict(r) for r in rows_for(o)]
+    for r in rows[pivot:]:
+        r["v"] = pullback_vol
+    for r in rows[max(0, pivot - setups.ADVANCE_BARS):pivot]:
+        r["v"] = advance_vol
+    return dict(CTX if ctx is None else ctx, rows=rows)
+
+
+class TestPullbackVolumeLegs(unittest.TestCase):
+    """_pullback_volume_ratio in isolation: the pivot, the two slices, the guards."""
+
+    def test_the_pivot_is_the_one_the_retracement_gate_uses(self):
+        """Both gates must describe the SAME leg. Two gates measuring "the
+        pullback" from two different highs would be two setups sharing a name."""
+        self.assertEqual(str(setups._retrace_swing(result())["date"]),
+                         str(ROWS[PIVOT_INDEX]["t"]))
+
+    def test_the_ratio_is_the_pullback_mean_over_the_advance_mean(self):
+        rows = [dict(r) for r in ROWS]
+        for r in rows[PIVOT_INDEX:]:
+            r["v"] = 400_000
+        for r in rows[PIVOT_INDEX - setups.ADVANCE_BARS:PIVOT_INDEX]:
+            r["v"] = 800_000
+        self.assertAlmostEqual(setups._pullback_volume_ratio(result(), rows),
+                               0.5, places=9)
+
+    def test_the_ratio_is_not_inverted(self):
+        """Advance over pullback would report 2.0 where the answer is 0.5, and a
+        gate written as a ceiling would then pass exactly the names it exists to
+        reject."""
+        rows = [dict(r) for r in ROWS]
+        for r in rows[PIVOT_INDEX:]:
+            r["v"] = 400_000
+        for r in rows[PIVOT_INDEX - setups.ADVANCE_BARS:PIVOT_INDEX]:
+            r["v"] = 800_000
+        self.assertLess(setups._pullback_volume_ratio(result(), rows), 1.0)
+
+    def test_the_advance_window_is_thirty_bars(self):
+        """Both edges. The 30th bar before the pivot is inside the window and
+        the 31st is outside, so a heavy bar at each position gives different
+        answers -- one changed, one unchanged."""
+        def ratio(spike_at):
+            rows = [dict(r) for r in ROWS]
+            for r in rows[PIVOT_INDEX:]:
+                r["v"] = 500_000
+            for r in rows[:PIVOT_INDEX]:
+                r["v"] = 1_000_000
+            rows[PIVOT_INDEX - spike_at]["v"] = 31_000_000
+            return setups._pullback_volume_ratio(result(), rows)
+        self.assertAlmostEqual(ratio(31), 0.5, places=9)     # outside: unchanged
+        self.assertLess(ratio(30), 0.5)                      # inside: dragged down
+
+    def test_the_pivot_bar_belongs_to_the_pullback_leg(self):
+        """A climax print on the high bar counts against the retracement, which
+        is the safe direction for a gate that exists to demand evidence. Were it
+        counted in the ADVANCE the same rows would read 0.38 instead of 1.56.
+        """
+        rows = [dict(r) for r in ROWS]
+        for r in rows[PIVOT_INDEX:]:
+            r["v"] = 500_000
+        for r in rows[PIVOT_INDEX - setups.ADVANCE_BARS:PIVOT_INDEX]:
+            r["v"] = 1_000_000
+        rows[PIVOT_INDEX]["v"] = 10_000_000
+        self.assertAlmostEqual(setups._pullback_volume_ratio(result(), rows),
+                               ((10_000_000 + 8 * 500_000) / 9) / 1_000_000,
+                               places=9)
+
+    def test_a_pivot_dated_outside_the_rows_cannot_be_measured(self):
+        o = result(swing_highs=[{"date": "1999-01-04", "px": 110.0}])
+        self.assertIsNone(setups._pullback_volume_ratio(o, ROWS))
+
+    def test_no_pivot_at_all_cannot_be_measured(self):
+        self.assertIsNone(setups._pullback_volume_ratio(result(swing_highs=[]),
+                                                        ROWS))
+        o = result()
+        del o["swing_highs"]
+        self.assertIsNone(setups._pullback_volume_ratio(o, ROWS))
+
+    def test_a_pullback_leg_shorter_than_five_bars_cannot_be_measured(self):
+        """Both sides of MIN_LEG_BARS on the retracement side: four bars is one
+        or two prints deciding the gate, five is the shortest measurable leg."""
+        four = result(swing_highs=[{"date": str(ROWS[-4]["t"]), "px": 110.0}])
+        five = result(swing_highs=[{"date": str(ROWS[-5]["t"]), "px": 110.0}])
+        self.assertIsNone(setups._pullback_volume_ratio(four, ROWS))
+        self.assertIsNotNone(setups._pullback_volume_ratio(five, ROWS))
+
+    def test_an_advance_shorter_than_five_bars_cannot_be_measured(self):
+        """Both sides on the advance side: a pivot four bars into the series has
+        no advance to speak of, one five bars in has the minimum."""
+        four = result(swing_highs=[{"date": str(ROWS[4]["t"]), "px": 110.0}])
+        five = result(swing_highs=[{"date": str(ROWS[5]["t"]), "px": 110.0}])
+        self.assertIsNone(setups._pullback_volume_ratio(four, ROWS))
+        self.assertIsNotNone(setups._pullback_volume_ratio(five, ROWS))
+
+    def test_a_zero_volume_advance_cannot_be_measured(self):
+        """No division by zero, and no infinity reported as a ratio."""
+        rows = [dict(r) for r in ROWS]
+        for r in rows[PIVOT_INDEX - setups.ADVANCE_BARS:PIVOT_INDEX]:
+            r["v"] = 0
+        self.assertIsNone(setups._pullback_volume_ratio(result(), rows))
+
+    def test_an_empty_row_series_cannot_be_measured(self):
+        self.assertIsNone(setups._pullback_volume_ratio(result(), []))
+
+
+class TestPullbackVolumeAgainstTheAdvance(unittest.TestCase):
+    """The gate itself.
+
+    On the live universe the median PULLBACK match retraced at 0.88x the volume
+    of its own advance -- half the list was resting on almost exactly the
+    participation that drove the move up, which is supply rather than rest.
+    Neither gate above this one can see it: dryup compares the 20-day average
+    against the 50-day, a statement about the last month rather than about this
+    pullback, and the down-thrust check only asks that no single bar exceeded
+    2.5x average.
+    """
+
+    def test_a_quiet_retracement_matches(self):
+        self.assertIsNotNone(
+            setups.match_pullback(result(), legs(result(), 400_000)))
+
+    def test_a_retracement_on_heavier_volume_than_the_advance_rejects(self):
+        self.assertIsNone(
+            setups.match_pullback(result(), legs(result(), 1_200_000)))
+
+    def test_the_ceiling_is_inclusive_at_0_90(self):
+        """`>` rejects, so a ratio of exactly 0.90 passes. Both sides, one part
+        in a million apart, so `>=` cannot survive."""
+        self.assertIsNotNone(
+            setups.match_pullback(result(), legs(result(), 900_000)))
+        self.assertIsNone(
+            setups.match_pullback(result(), legs(result(), 900_001)))
+
+    def test_strict_tightens_the_ceiling_to_0_75(self):
+        o = result()
+        for v in (760_000, 800_000, 900_000):
+            self.assertIsNotNone(setups.match_pullback(o, legs(o, v)), v)
+            self.assertIsNone(setups.match_pullback(o, legs(o, v), strict=True), v)
+
+    def test_the_strict_ceiling_is_inclusive_at_0_75(self):
+        o = result()
+        self.assertIsNotNone(setups.match_pullback(o, legs(o, 750_000),
+                                                   strict=True))
+
+    def test_an_unmeasurable_ratio_rejects(self):
+        """"Cannot judge" closes the gate. A silent None-passes-everything is
+        how a gate becomes decorative."""
+        o = result(swing_highs=[{"date": "1999-01-04", "px": 110.0}])
+        self.assertIsNone(setups.match_pullback(o, dict(CTX, rows=rows_for(o))))
+
+    def test_the_gate_reads_the_pivot_the_retracement_gate_used(self):
+        """A LATER, LOWER pivot exists three bars from the end. Measuring from
+        it would leave a three-bar leg -- under MIN_LEG_BARS, so unmeasurable,
+        so a rejection. Measuring from the highest of the last five, as the
+        retracement gate does, leaves a nine-bar leg and this name matches.
+        """
+        o = result(swing_highs=[{"date": str(ROWS[PIVOT_INDEX]["t"]), "px": 110.0},
+                                {"date": str(ROWS[-3]["t"]), "px": 104.0}])
+        self.assertIsNotNone(setups.match_pullback(o, legs(o, 400_000)))
+
+    def test_the_rejection_names_the_volume_condition(self):
+        diag = {}
+        setups.match_pullback(result(), legs(result(), 1_200_000), diag=diag)
+        (label, _), = diag.items()
+        self.assertIn("volume of the advance", label)
+
+    def test_the_gate_sits_after_the_down_thrust_check(self):
+        """Funnel order: a name failing both is recorded at the down-thrust."""
+        diag = {}
+        o = result(volume=vol(dryup=0.8, thrusts=((-2, "down"),)))
+        setups.match_pullback(o, legs(o, 1_200_000), diag=diag)
+        (label, (step, _)), = diag.items()
+        self.assertIn("down-thrust", label)
+        self.assertEqual(step, 11)
 
 
 if __name__ == "__main__":

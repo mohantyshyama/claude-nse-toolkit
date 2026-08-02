@@ -90,6 +90,63 @@ def window_widths(rows, n=3):
     return out
 
 
+# Bars the up/down volume ratio is measured over. FIFTY: ~10 weeks, the window
+# O'Neil's ratio is conventionally quoted on. Long enough that one earnings
+# reaction cannot set the number, short enough that it describes the leg being
+# screened rather than last year's.
+UD_BARS = 50
+
+
+def ud_ratio(rows, n=UD_BARS):
+    """Up-close volume divided by down-close volume over the last `n` bars.
+
+    O'Neil's up/down volume ratio -- the standard measure of whether a name is
+    under net accumulation. Above 1.0 means more volume transacted on days that
+    closed up than on days that closed down; below 1.0 means the opposite.
+
+    DIRECTION IS MEASURED AGAINST THE PREVIOUS CLOSE, not against the bar's own
+    open. A bar can open down and close up and still be a down day against
+    yesterday's settle, and it is the settle-to-settle move that says which side
+    the day's volume served. Note that the engine's thrust labels use a
+    DIFFERENT convention (`c > o`, the bar's own open) -- the two are separate
+    measurements and neither stands in for the other, which is why COILED gates
+    on thrust direction and LEADER/TURN gate on this.
+
+    The first bar of the window is judged against the bar BEFORE the window when
+    there is one, so exactly `n` bars are classified rather than n-1. Unchanged
+    closes belong to neither side: they carry no directional information, and
+    parking them on either numerator or denominator would let a series of doji
+    decide the ratio.
+
+    Returns None -- never a division, never an infinity -- when the denominator
+    is zero, when `n` is not positive, or when no bar could be classified at all.
+    CALLERS MUST TREAT None AS A FAILED GATE, not a pass: 50 sessions without a
+    single down close does not happen to a liquid NSE name, so in practice None
+    means the series is too short, constant, or otherwise unmeasurable. "Cannot
+    judge" closes the gate it guards; a gate that exists to demand positive
+    evidence of accumulation must not open on the absence of evidence.
+    """
+    if n <= 0 or len(rows) < 2:
+        return None                 # rows[-0:] is the WHOLE list, not an empty
+                                    # window -- guard it rather than silently
+                                    # measuring two years on a caller's typo
+    window = rows[-n:]
+    start = len(rows) - len(window)
+    up = down = 0.0
+    for i, r in enumerate(window):
+        prev = start + i - 1
+        if prev < 0:
+            continue                # no prior close to judge the first bar by
+        pc = rows[prev]["c"]
+        if r["c"] > pc:
+            up += r["v"]
+        elif r["c"] < pc:
+            down += r["v"]
+    if down <= 0:
+        return None
+    return up / down
+
+
 def turnover_cr(rows, n=50):
     """Median daily turnover over the last n bars, in rupees crore.
 
@@ -125,16 +182,43 @@ COILED_WINDOWS = 4
 
 # (loosened, strict) per spec section 3. Strict must always be a SUBSET of
 # loosened -- Task 9's test asserts it across the live universe.
+#
+# VOLUME CONFIRMATION -- one test per setup, chosen for its STAGE. They are not
+# the same test wearing four labels:
+#
+#   COILED    counts prior up-thrusts. A base has no current demand by
+#             definition -- that is what a base IS -- so asking it for a healthy
+#             up/down ratio would reject every genuine coil. What it can be
+#             asked is whether anyone ever accumulated it.
+#   BREAKOUT  is NOT gated here. It already demands 1.5-2.0x average volume on
+#             the breakout bar itself, which is the most direct volume evidence
+#             any of these setups has.
+#   LEADER    gates on the up/down ratio: a leader is a name under sustained
+#             accumulation, and that is exactly what the ratio measures.
+#   PULLBACK  compares the volume of the retracement against the advance it
+#             retraces. A pullback on heavier volume than the advance is supply.
+#   TURN      gates on the up/down ratio, for the same reason as LEADER. It is
+#             deliberately NOT gated on vol_expansion -- see match_turn.
+#
+# The floors are ABSOLUTE, not percentiles of the day's universe, and that is a
+# trade-off with a documented cost: 73% of the live Nifty 500 clears 1.0 and 54%
+# clears 1.25, so in this accumulative tape they are moderate filters. In a broad
+# selloff the same numbers could reject nearly everything, and an empty screen
+# would then mean "this threshold no longer suits the regime" rather than "no
+# setups exist". A percentile floor would self-adjust but would also guarantee
+# matches every day, including days when the honest answer is that nothing is
+# being accumulated. See docs/setups.md.
 THRESHOLDS = {
     "COILED": {"min_bars": (16, 20), "atr_pctile": (0.333, 0.25),
                "contractions": (2, 3), "pos_in_base": (0.50, 0.60),
-               "dryup": (1.0, 0.9), "sma50_rising": (False, True)},
+               "dryup": (1.0, 0.9), "sma50_rising": (False, True),
+               "up_thrusts": (1, 2)},
     "BREAKOUT": {"min_bars": (12, 15), "vol_mult": (1.5, 2.0),
                  "max_extension_pct": (12.0, 8.0), "strict_ma_stack": (False, True)},
     "LEADER": {"max_from_high_pct": (10.0, 5.0), "rs_1m_floor": (-2.0, 0.0),
                "rsi_lo": (50.0, 55.0), "rsi_hi": (88.0, 85.0),
                "atr_pctile_hi": (0.90, 0.85), "max_run_pct": (10.0, 8.0),
-               "strict_ma_stack": (False, True)},
+               "strict_ma_stack": (False, True), "ud_ratio": (1.25, 1.50)},
     "PULLBACK": {"ma_dist_pct": (3.0, 2.0), "atr_mult_to_support": (1.2, 1.0),
                  "swing_margin_atr": (1.0, 1.5),
                  "min_retrace_pct": (3.0, 5.0),
@@ -142,9 +226,10 @@ THRESHOLDS = {
                  "close_position": (0.50, 0.60),
                  "reversal_bars": (2, 1),
                  "rsi_lo": (38.0, 40.0), "rsi_hi": (62.0, 58.0),
-                 "dryup": (1.1, 1.0), "thrust_bars": (8, 10)},
+                 "dryup": (1.1, 1.0), "thrust_bars": (8, 10),
+                 "pullback_vol_ratio": (0.90, 0.75)},
     "TURN": {"cross_bars": (45, 30), "rsi_lo": (48.0, 50.0),
-             "off_low_pct": (12.0, 20.0)},
+             "off_low_pct": (12.0, 20.0), "ud_ratio": (1.25, 1.50)},
 }
 
 
@@ -168,6 +253,73 @@ def band_desc(value, cuts):
         if value <= threshold:
             return score
     return 0.0
+
+
+# ------------------------------------------------------- the accumulation term
+#
+# ONE sub-score, shared by all five setups, so that "accumulation" means the
+# same thing in every table. A per-setup variant would let an 8 for LEADER and
+# an 8 for TURN describe different measurements, which is exactly the confusion
+# Setup Fit already carries as a whole and must not compound.
+#
+# The gates (section 2) ask a yes/no question at a floor; this asks HOW MUCH,
+# across the whole range, and so it ranks rather than filters. That is why
+# BREAKOUT -- which has no up/down gate at all, because its breakout-bar volume
+# multiple is the more direct evidence -- still carries this term: it costs a
+# breakout nothing to be under accumulation as well, and between two otherwise
+# equal breakouts the one being accumulated is the better row.
+ACCUMULATION_CUTS = [(2.50, 10.0), (2.00, 9.0), (1.50, 8.0),
+                     (1.25, 6.0), (1.00, 4.0)]
+
+# What a name scores when it is NOT under net accumulation, and what an
+# UNMEASURABLE ratio scores. Two is deliberately not zero: below 1.0 is a real,
+# measured finding about a name that still cleared every other gate, and zeroing
+# the term would let one soft input dominate a five-term score. It is also not
+# the 4.0 of the 1.00-1.25 rung, because "distributing" and "mildly
+# accumulating" must not tie.
+NO_ACCUMULATION = 2.0
+
+
+def fit_accumulation(ud):
+    """0-10 for O'Neil's up/down volume ratio. The ranking half of section 3.
+
+    None -- no down-volume in the window, so the ratio is unmeasurable -- scores
+    the floor, NOT a neutral middle and NOT the top. It is the same decision the
+    gates make in _ud_ratio_ok, for the same reason: a score that rewards the
+    ABSENCE of evidence would put an unmeasurable name above a measured one, and
+    on this metric unmeasurable means a series too short or too flat to judge.
+    Note that this arm is reachable only through COILED, BREAKOUT and PULLBACK,
+    whose gates do not require the ratio; LEADER and TURN reject a None long
+    before their fit is computed.
+    """
+    if ud is None or ud < ACCUMULATION_CUTS[-1][0]:
+        return NO_ACCUMULATION
+    return band(ud, ACCUMULATION_CUTS)
+
+
+# Every Fit weight, as DATA rather than as literals inside five expressions, so
+# that "each set sums to exactly 1.0" is a property a test can assert about the
+# code instead of a claim a docstring makes about it. Each of these sums to 1.0
+# exactly in binary floating point -- none of them needs a tolerance.
+#
+# The accumulation term was not bolted on top; every other weight came down to
+# make room, so a Fit is still out of 10 and still comparable with yesterday's
+# in kind if not in value. PULLBACK is the one structural change: its blunt
+# `dryup` term -- the 20-day average against the 50-day, a statement about the
+# last month rather than about this pullback -- is REPLACED by the
+# pullback-versus-advance ratio, which measures the same idea properly.
+FIT_WEIGHTS = {
+    "COILED":   {"contraction": 0.35, "pos_in_base": 0.25,
+                 "dryup": 0.20, "accumulation": 0.20},
+    "BREAKOUT": {"vol_mult": 0.35, "freshness": 0.25,
+                 "base_quality": 0.20, "accumulation": 0.20},
+    "LEADER":   {"rs_3m": 0.35, "proximity": 0.30,
+                 "stack": 0.15, "accumulation": 0.20},
+    "PULLBACK": {"dist_to_ma": 0.30, "rsi": 0.20, "pullback_vol": 0.25,
+                 "retrace_depth": 0.15, "accumulation": 0.10},
+    "TURN":     {"cross_recency": 0.30, "sma200_slope": 0.25,
+                 "vol_expansion": 0.15, "macd": 0.10, "accumulation": 0.20},
+}
 
 
 def liquid(ctx, min_cr):
@@ -196,6 +348,49 @@ def _reject(diag, step, label):
         _, seen = diag.get(label, (step, 0))
         diag[label] = (step, seen + 1)
     return None
+
+
+def _ud_ratio_ok(ctx, name, strict):
+    """Does this name clear its up/down volume floor?
+
+    THE SINGLE PLACE the None decision is written down, so LEADER and TURN
+    cannot drift apart on it: an UNMEASURABLE ratio FAILS. `r is not None and
+    ...` rather than `(r or 0) >= floor` because the two differ on a real 0.0 --
+    a name with up-volume of zero is measurably under distribution and must
+    reject through the comparison, not through the None guard, or the funnel
+    would report a data problem where there is a market finding.
+    """
+    r = ctx.get("ud_ratio")
+    return r is not None and r >= T(name, "ud_ratio", strict)
+
+
+# Sessions COILED counts prior up-thrusts over. 126 is ~6 months, the same
+# window ATR_PCTILE_BARS ranks volatility in, so "quiet relative to its own six
+# months" and "accumulated at some point in those six months" describe one span.
+#
+# ARITHMETIC NOTE, so nobody reads more into this number than it does:
+# analyze.detect_thrusts scans `window=90` bars and labels nothing older, so no
+# thrust older than 90 bars EXISTS to be counted and 126 behaves exactly as 90
+# does today. It is written as 126 anyway -- it stays correct if the engine's
+# window ever widens, and it says what this gate MEANS rather than what the
+# engine currently supplies. TestCoiledUpThrustLookback pins the relationship.
+UP_THRUST_BARS = 126
+
+
+def _up_thrust_count(o, rows, bars):
+    """How many UP-labelled volume thrusts fall inside the last `bars` sessions.
+
+    Reads the engine's own directional label, exactly as _no_down_thrust does;
+    it never re-derives one. `rows` is a parameter rather than being taken off
+    o["_rows"] so that this count and the rest of the predicate provably read
+    the same series -- a predicate reading a key the engine does not set would
+    silently count zero and reject everything.
+    """
+    recent = {str(r["t"]) for r in rows[-bars:]} if bars > 0 else set()
+    if not recent:
+        return 0
+    return sum(1 for t in (o["volume"].get("thrusts") or [])
+               if t.get("dir") == "up" and t.get("date") in recent)
 
 
 def _no_down_thrust(o, bars):
@@ -278,6 +473,23 @@ def match_coiled(o, ctx, strict=False, diag=None):
         return _reject(diag, 11, "volume dried up below %.2fx its own average"
                        % T("COILED", "dryup", strict))
 
+    # A base with no prior accumulation is a dead stock, not a coiled spring.
+    # Everything above this line is satisfied by a name nobody is trading: the
+    # range narrows because there is no participation, volatility falls to the
+    # bottom of its own history because nothing happens, and the dry-up gate
+    # rewards exactly that. What separates a spring from a corpse is that
+    # somebody took real size in it at some point -- at least one bar of 2.5x
+    # volume the engine labelled UP. Strict asks for two, because a single
+    # thrust can be an index rebalance or a block crossing.
+    #
+    # Counted, not merely detected: the direction is read off the engine's label
+    # and never re-derived, so a name that sold off on 3x volume cannot be
+    # counted as accumulation here any more than it can in _no_down_thrust.
+    ups = _up_thrust_count(o, ctx.get("rows") or [], UP_THRUST_BARS)
+    if ups < T("COILED", "up_thrusts", strict):
+        return _reject(diag, 12, "at least %d up-thrust in the last %d sessions"
+                       % (T("COILED", "up_thrusts", strict), UP_THRUST_BARS))
+
     # First-to-last window, whatever COILED_WINDOWS is: widths[-1], not widths[2].
     # The net-contraction gate above guarantees this ratio is < 1.0 for every
     # name that reaches here -- the Contraction column can no longer print 1.01.
@@ -288,15 +500,25 @@ def match_coiled(o, ctx, strict=False, diag=None):
     # rejected at the net-contraction gate and never reaches this line. Kept as
     # a division guard in case that gate is ever reordered.
     return {"contraction": widths[-1] / widths[0] if widths[0] else 1.0,
-            "pos_in_base": pos, "dryup": dryup, "widths": widths}
+            "pos_in_base": pos, "dryup": dryup, "widths": widths,
+            "ud_ratio": ctx.get("ud_ratio")}
 
 
 def fit_coiled(ev):
-    """Contraction 40% / position in base 30% / dry-up 30%."""
+    """Contraction 35% / position in base 25% / dry-up 20% / accumulation 20%.
+
+    The dry-up term and the accumulation term are not the same measurement
+    twice. Dry-up asks whether volume is quiet NOW, which is what makes a base a
+    base; accumulation asks whether it was ever bought, which is what makes the
+    base worth watching. A dead stock scores well on the first and badly on the
+    second, and before this term existed it could lead the table.
+    """
+    w = FIT_WEIGHTS["COILED"]
     c = band_desc(ev["contraction"], [(0.50, 10), (0.65, 8), (0.80, 6), (1.00, 4)])
     p = band(ev["pos_in_base"], [(0.85, 10), (0.70, 8), (0.50, 6)])
     d = band_desc(ev["dryup"], [(0.70, 10), (0.85, 8), (1.00, 6)])
-    return round(0.40 * c + 0.30 * p + 0.30 * d, 2)
+    return round(w["contraction"] * c + w["pos_in_base"] * p + w["dryup"] * d
+                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
 
 
 # ------------------------------------------------------------------ BREAKOUT
@@ -421,17 +643,27 @@ def match_breakout(o, ctx, strict=False, diag=None):
     return {"vol_mult": vol_mult, "pct_above_base": above,
             "base_bars": rng["bars"],
             "tightness": span / base_hi * 100 if base_hi else 0.0,
-            "volume_light": vol_mult < CONFIRMED_VOL_MULT}
+            "volume_light": vol_mult < CONFIRMED_VOL_MULT,
+            "ud_ratio": ctx.get("ud_ratio")}
 
 
 def fit_breakout(ev):
-    """Volume multiple 40% / freshness 30% / base quality 30%."""
+    """Volume multiple 35% / freshness 25% / base quality 20% / accumulation 20%.
+
+    BREAKOUT is the one setup with no up/down volume GATE, because its
+    breakout-bar multiple is the more direct evidence and gating twice on volume
+    would count it twice. It still carries the accumulation term, which costs a
+    genuine breakout nothing and separates a bar that fired out of ten weeks of
+    buying from one that fired out of ten weeks of nothing.
+    """
+    w = FIT_WEIGHTS["BREAKOUT"]
     v = band(ev["vol_mult"], [(3.0, 10), (2.5, 9), (2.0, 8), (1.75, 6), (1.5, 4)])
     f = band_desc(ev["pct_above_base"], [(2.0, 10), (5.0, 8), (8.0, 6), (12.0, 4)])
     b = band(ev["base_bars"], [(30, 10), (20, 8), (15, 6), (12, 4)])
     if ev["tightness"] > 8.0:
         b *= 0.8
-    return round(0.40 * v + 0.30 * f + 0.30 * b, 2)
+    return round(w["vol_mult"] * v + w["freshness"] * f + w["base_quality"] * b
+                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
 
 
 # -------------------------------------------------------------------- LEADER
@@ -503,16 +735,39 @@ def match_leader(o, ctx, strict=False, diag=None):
     if not _no_down_thrust(o, 10):
         return _reject(diag, 10, "no down-thrust in the last 10 sessions")
 
+    # Positive evidence of accumulation, not merely the absence of a down-thrust.
+    # Measured across the live Nifty 500, LEADER's median up/down volume ratio
+    # was 1.34 against a universe median of 1.33 -- statistically the same tape.
+    # The setup selected names near 52-week highs with positive relative
+    # strength and NO volume edge whatever, which is a price screen wearing a
+    # volume screen's reputation. The down-thrust test above cannot supply this:
+    # it asks only that nothing violent happened in ten sessions, and a name
+    # drifting up on nobody's participation passes it every time.
+    if not _ud_ratio_ok(ctx, "LEADER", strict):
+        return _reject(diag, 11, "volume on up-closes at least %.2fx volume on "
+                                 "down-closes over %d sessions"
+                       % (T("LEADER", "ud_ratio", strict), UD_BARS))
+
     return {"pct_from_high": from_high, "rs_1m": rs["1m"], "rs_3m": rs["3m"],
-            "full_stack": bool(px > ma["sma20"] > ma["sma50"] > ma["sma200"])}
+            "full_stack": bool(px > ma["sma20"] > ma["sma50"] > ma["sma200"]),
+            "ud_ratio": ctx.get("ud_ratio")}
 
 
 def fit_leader(ev):
-    """Relative strength 3m 40% / proximity to high 35% / stack completeness 25%."""
+    """Relative strength 3m 35% / proximity 30% / stack 15% / accumulation 20%.
+
+    LEADER now gates on the up/down ratio as well, so every name reaching this
+    function is already at 1.25 or better and scores at least 6 here. The term
+    is still doing work: the gate cannot separate a name at 1.26 from one at
+    3.0, and on a setup whose whole claim is sustained institutional demand that
+    is the difference the ranking should show.
+    """
+    w = FIT_WEIGHTS["LEADER"]
     r = band(ev["rs_3m"], [(20.0, 10), (10.0, 8), (5.0, 6), (0.0, 4)])
     p = band_desc(ev["pct_from_high"], [(2.0, 10), (5.0, 8), (10.0, 6)])
     s = 10.0 if ev["full_stack"] else 7.0
-    return round(0.40 * r + 0.35 * p + 0.25 * s, 2)
+    return round(w["rs_3m"] * r + w["proximity"] * p + w["stack"] * s
+                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
 
 
 # ------------------------------------------------------------------ PULLBACK
@@ -556,6 +811,23 @@ def _below_recent_swing_high(o, px, atr_d, mult):
 RETRACE_SWINGS = 5
 
 
+def _retrace_swing(o):
+    """The pivot this retracement is measured FROM: the highest of the last
+    RETRACE_SWINGS swing highs, as a whole {date, px} record.
+
+    Shared by the retracement gate and the advance-versus-pullback volume gate
+    so that both provably describe the SAME leg. Two gates measuring "the
+    pullback" from two different highs would be two different setups sharing a
+    name, and the disagreement would be invisible in the output.
+
+    Returns None when there is no usable pivot.
+    """
+    swings = [s for s in (o.get("swing_highs") or []) if s.get("px")]
+    if not swings:
+        return None
+    return max(swings[-RETRACE_SWINGS:], key=lambda s: s["px"])
+
+
 def _retrace_from_swing_high(o, px):
     """How far below a recent swing high `px` sits, in percent.
 
@@ -563,13 +835,78 @@ def _retrace_from_swing_high(o, px):
     price is not positive -- "cannot judge", which the caller must treat as a
     rejection and never as a pass.
     """
-    swings = [s.get("px") for s in (o.get("swing_highs") or []) if s.get("px")]
-    if not swings:
+    peak = _retrace_swing(o)
+    if peak is None:
         return None
-    hi = max(swings[-RETRACE_SWINGS:])
+    hi = peak["px"]
     if hi <= 0:
         return None
     return (hi - px) / hi * 100
+
+
+# Bars BEFORE the swing high the advance's volume is averaged over. THIRTY: long
+# enough to describe the leg that carried price to the high rather than its last
+# few bars, short enough that it does not reach back through the base the advance
+# started from and average the dead volume in it.
+ADVANCE_BARS = 30
+
+# The shortest leg on either side that can carry an average worth comparing.
+# Below this the "average" is one or two prints and a single block trade sets
+# the ratio, so the answer is None -- unmeasurable -- rather than a number.
+MIN_LEG_BARS = 5
+
+
+def _pullback_volume_ratio(o, rows):
+    """Average volume in the retracement over average volume in the advance.
+
+    Below 1.0 means the pullback is trading on lighter volume than the move it
+    is retracing: holders are resting rather than selling. Above 1.0 means the
+    retracement is drawing MORE participation than the advance did, which is
+    distribution wearing a pullback's shape. Measured on the live Nifty 500, the
+    median PULLBACK match came in at 0.88 -- most "pullbacks" this screen found
+    were retracing on volume nearly as heavy as the advance before them.
+
+    The legs, stated explicitly because the slice boundaries are the whole test:
+
+        advance    rows[peak - 30 : peak]     the 30 bars BEFORE the pivot
+        pullback   rows[peak :]               the pivot bar to the last closed one
+
+    The pivot bar belongs to the PULLBACK leg. It is the bar that printed the
+    high, so it is where the retracement starts; and when its volume is a
+    climax print, counting it against the pullback makes the gate harder to
+    pass, which is the safe direction for a gate whose whole purpose is to
+    demand evidence.
+
+    Returns None -- and the caller MUST reject on None, never pass -- when there
+    is no pivot, when the pivot's date is not in `rows` at all, when either leg
+    is shorter than MIN_LEG_BARS, or when the advance carried no volume to
+    divide by. A gate that opens whenever its measurement is unavailable is
+    decorative, and every one of these cases is reachable: a swing high dated
+    outside the aligned rows, a pivot within a few bars of the series start, and
+    a zero-volume advance in a halted name.
+    """
+    peak = _retrace_swing(o)
+    if peak is None:
+        return None
+    date = str(peak.get("date"))
+    # Searched from the RIGHT: the pivot is near the end of the series, and on
+    # the impossible-but-cheap case of a repeated date the later bar is the one
+    # this leg is about.
+    idx = None
+    for i in range(len(rows) - 1, -1, -1):
+        if str(rows[i]["t"]) == date:
+            idx = i
+            break
+    if idx is None:
+        return None
+    pullback = rows[idx:]
+    advance = rows[max(0, idx - ADVANCE_BARS):idx]
+    if len(pullback) < MIN_LEG_BARS or len(advance) < MIN_LEG_BARS:
+        return None
+    adv = sum(r["v"] for r in advance) / len(advance)
+    if adv <= 0:
+        return None
+    return (sum(r["v"] for r in pullback) / len(pullback)) / adv
 
 
 def _close_position(bar):
@@ -727,6 +1064,20 @@ def match_pullback(o, ctx, strict=False, diag=None):
         return _reject(diag, 11, "no down-thrust in the last %d sessions"
                        % T("PULLBACK", "thrust_bars", strict))
 
+    # The retracement has to be RESTING, not being sold. Neither gate above says
+    # so: dryup compares the 20-day average against the 50-day, which is a
+    # statement about the last month rather than about this pullback, and the
+    # down-thrust test only asks that no single bar exceeded 2.5x average. A
+    # stock can retrace on steady heavy volume for a fortnight and pass both.
+    # It did: the median PULLBACK match retraced at 0.88x the volume of its own
+    # advance, so half the list was resting on almost exactly the participation
+    # that drove the move up. That is supply.
+    pull_vol = _pullback_volume_ratio(o, ctx.get("rows") or [])
+    if pull_vol is None or pull_vol > T("PULLBACK", "pullback_vol_ratio", strict):
+        return _reject(diag, 12, "a pullback on no more than %.2fx the volume "
+                                 "of the advance it retraces"
+                       % T("PULLBACK", "pullback_vol_ratio", strict))
+
     # TWO retracement numbers, deliberately, because they answer two questions
     # and neither substitutes for the other:
     #
@@ -741,8 +1092,13 @@ def match_pullback(o, ctx, strict=False, diag=None):
     #                            percentage would put every match in the band's
     #                            bottom rung, since the gate only asks for 3%.
     span = o["hi52"] - o["lo52"]
+    # dryup stays in the evidence though fit_pullback no longer scores it: it is
+    # still a live GATE, so the CSV's flags and any reader asking "why did this
+    # match" need the number that let it through.
     return {"dist_to_ma_pct": near_ma, "rsi": r, "dryup": dryup,
             "close_position": close_pos, "retrace_pct": retrace,
+            "pullback_vol_ratio": pull_vol,
+            "ud_ratio": ctx.get("ud_ratio"),
             "retrace_of_52w_range_pct": (o["hi52"] - px) / span * 100
                                         if span else 0.0}
 
@@ -777,18 +1133,45 @@ def retrace_depth(x):
     return 4.0
 
 
+# The pullback-versus-advance ratio, banded. LOWER is better, so band_desc.
+#
+# The gate already rejects anything above 0.90 (strict 0.75), so the 4.0 rung is
+# the floor a matching name can reach and the 0.0 fall-through is unreachable
+# through match_pullback -- it is a guard for a caller passing evidence in by
+# hand, not a live arm. The rungs sit BELOW the gate rather than around it,
+# because the interesting distinction among matches is between a retracement at
+# half the advance's volume and one at nine tenths of it.
+PULLBACK_VOL_CUTS = [(0.50, 10), (0.65, 8), (0.80, 6), (0.90, 4)]
+
+
 def fit_pullback(ev):
-    """Distance to MA 35% / RSI near 50 25% / dry-up 20% / retrace depth 20%.
+    """Distance to MA 30% / RSI near 50 20% / pullback volume 25% /
+    retrace depth 15% / accumulation 10%.
 
     The depth term reads retrace_of_52w_range_pct, NOT retrace_pct: retrace_depth
     bands a share of the 52-week range, and the swing-high percentage the gate
     uses lives on a different scale entirely.
+
+    The blunt `dryup` term this setup used to carry is REPLACED, not merely
+    outweighed, by the pullback-versus-advance ratio. Both claim to measure "is
+    this retracement quiet", but dryup compares a 20-day average against a
+    50-day one -- a statement about the last month that knows nothing about
+    where the pullback began -- while the new term measures the retracement leg
+    against the advance it is retracing. Keeping both would have scored one idea
+    twice and given the worse measurement half the credit. dryup remains a gate.
+
+    PULLBACK carries the SMALLEST accumulation weight of the five at 10%, and
+    deliberately: it already spends 25% on a volume term of its own, and this
+    setup buys a name that is by definition NOT being accumulated this week.
+    The up/down ratio here describes the trend the pullback interrupts.
     """
+    w = FIT_WEIGHTS["PULLBACK"]
     d = band_desc(ev["dist_to_ma_pct"], [(1.0, 10), (2.0, 8), (3.0, 6)])
     r = band_desc(abs(ev["rsi"] - 50.0), [(5.0, 10), (10.0, 8), (99.0, 5)])
-    v = band_desc(ev["dryup"], [(0.80, 10), (0.95, 8), (1.10, 5)])
-    return round(0.35 * d + 0.25 * r + 0.20 * v
-                 + 0.20 * retrace_depth(ev["retrace_of_52w_range_pct"]), 2)
+    v = band_desc(ev["pullback_vol_ratio"], PULLBACK_VOL_CUTS)
+    return round(w["dist_to_ma"] * d + w["rsi"] * r + w["pullback_vol"] * v
+                 + w["retrace_depth"] * retrace_depth(ev["retrace_of_52w_range_pct"])
+                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
 
 
 # ---------------------------------------------------------------------- TURN
@@ -822,18 +1205,51 @@ def match_turn(o, ctx, strict=False, diag=None):
         return _reject(diag, 7, "at least %.0f%% off the 52-week low"
                        % T("TURN", "off_low_pct", strict))
 
+    # A new trend nobody is accumulating is a moving average crossing, not a
+    # turn. Everything above this line is price and price-derived: two averages,
+    # their order, a histogram, an RSI, a distance off the low. A stock can
+    # produce all of it by drifting up on no participation at all, which is
+    # precisely what a golden cross does when it is an artifact of the 200-day
+    # flattening rather than of demand.
+    #
+    # The gate is the up/down ratio and NOT ctx["vol_expansion"], deliberately.
+    # vol_expansion compares volume since the cross against the 50 bars before
+    # it, so its answer depends on the AGE of the cross: a cross 30-40 bars old
+    # has long since normalised and reads ~1.0 however strong the demand behind
+    # it, while a cross 3 bars old reads high on three noisy sessions. Gating on
+    # it would penalise the age of the cross and call it weak demand. It stays a
+    # Fit component, where a soft input is appropriate, and never a gate.
+    if not _ud_ratio_ok(ctx, "TURN", strict):
+        return _reject(diag, 8, "volume on up-closes at least %.2fx volume on "
+                                "down-closes over %d sessions"
+                       % (T("TURN", "ud_ratio", strict), UD_BARS))
+
     return {"bars_since_cross": bars, "macd_hist": hist,
             "sma200_rising": bool(ctx["sma200_rising"]),
-            "vol_expansion": ctx.get("vol_expansion") or 1.0}
+            "vol_expansion": ctx.get("vol_expansion") or 1.0,
+            "ud_ratio": ctx.get("ud_ratio")}
 
 
 def fit_turn(ev):
-    """Cross recency 35% / 200D slope 30% / volume expansion 20% / MACD 15%."""
+    """Cross recency 30% / 200D slope 25% / volume expansion 15% / MACD 10% /
+    accumulation 20%.
+
+    vol_expansion and accumulation are BOTH here and they are not redundant.
+    vol_expansion is anchored to the golden cross, so it answers "has
+    participation picked up since the turn" and decays as the cross ages;
+    the up/down ratio is a fixed 50-bar window that answers "who is winning the
+    days" regardless of when the cross happened. That decay is exactly why
+    vol_expansion is a Fit component and never a gate -- see match_turn -- and
+    why it now carries less weight than the measure that does not decay.
+    """
+    w = FIT_WEIGHTS["TURN"]
     c = band_desc(ev["bars_since_cross"], [(10, 10), (20, 9), (30, 7), (45, 5)])
     s = 10.0 if ev["sma200_rising"] else 4.0
     v = band(ev["vol_expansion"], [(1.30, 10), (1.10, 8), (0.0, 5)])
     m = 10.0 if ev["macd_hist"] > 0 else 6.0
-    return round(0.35 * c + 0.30 * s + 0.20 * v + 0.15 * m, 2)
+    return round(w["cross_recency"] * c + w["sma200_slope"] * s
+                 + w["vol_expansion"] * v + w["macd"] * m
+                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
 
 
 # ------------------------------------------------------------ context builder
@@ -896,7 +1312,12 @@ def _ctx_from_rows(rows, rs):
     return {"rows": rows, "rs": rs, "atr_pctile": atr_pctile,
             "sma200_rising": sma200_rising, "sma50_rising": sma50_rising,
             "bars_since_cross": bars_since_cross, "vol_expansion": vol_expansion,
-            "run_pct": run_pct}
+            "run_pct": run_pct,
+            # Once per symbol, here, for the same reason as every other value in
+            # this dict: LEADER and TURN both gate on it and the report prints it
+            # for every setup, so recomputing it per predicate would walk the
+            # same 50 bars three times for each of 500 names.
+            "ud_ratio": ud_ratio(rows, UD_BARS)}
 
 
 def build_ctx(o, rs):
@@ -941,8 +1362,20 @@ def _add_confluence(matched):
     fits = [matched[n]["fit"] for n in names]
     matched["CONFLUENCE"] = {
         "fit": round(sum(fits) / len(fits), 2),
+        # ud_ratio is a property of the SYMBOL, not of any one setup, so every
+        # constituent carries the identical number and taking the first is not
+        # a choice between disagreeing values. It is copied up rather than
+        # recomputed so the CONFLUENCE row prints the same figure as the rows it
+        # is made of -- a column that disagreed with its own inputs would be
+        # worse than no column.
+        #
+        # Carried at the TOP LEVEL as well as inside evidence, because
+        # CONFLUENCE must satisfy the same read as every other entry: a renderer
+        # walking matched[setup]["ud_ratio"] cannot special-case one key.
+        "ud_ratio": matched[names[0]]["ud_ratio"],
         "evidence": {"matched": names, "count": len(names),
                      "label": "+".join(names),
+                     "ud_ratio": matched[names[0]]["evidence"].get("ud_ratio"),
                      "mean_fit": round(sum(fits) / len(fits), 2)}}
     return matched
 
@@ -957,8 +1390,11 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
       * ``{}``            -- the symbol is liquid and was screened against every
                              predicate, and matched none of them. This is the
                              overwhelmingly common outcome and is a real finding.
-      * non-empty ``dict`` -- ``{setup: {"fit", "evidence"}}`` per match, plus
-                             ``CONFLUENCE`` when two or more setups agree.
+      * non-empty ``dict`` -- ``{setup: {"fit", "evidence", "ud_ratio"}}`` per
+                             match, plus ``CONFLUENCE`` when two or more setups
+                             agree. ``ud_ratio`` is present on EVERY entry
+                             including ``CONFLUENCE``, and may be None when the
+                             symbol had no down-volume to divide by.
 
     Callers must test ``is None``, never truthiness: both non-match states are
     falsy, and collapsing them makes the scan header report several hundred
@@ -985,5 +1421,13 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
         ev = match_fn(o, ctx, strict,
                       None if diag is None else diag.setdefault(name, {}))
         if ev is not None:
-            matched[name] = {"fit": fit_fn(ev), "evidence": ev}
+            # ud_ratio rides at the TOP LEVEL, beside fit and evidence, not only
+            # inside evidence. It is a property of the SYMBOL rather than of any
+            # one match, so a caller that wants to print it for every setup --
+            # including CONFLUENCE, whose evidence slots are already spoken for
+            # -- must be able to read one key off any entry without knowing
+            # which predicate produced it. Taken from ctx, the single place it
+            # is computed, so the five predicates cannot drift apart on it.
+            matched[name] = {"fit": fit_fn(ev), "evidence": ev,
+                             "ud_ratio": ctx["ud_ratio"]}
     return _add_confluence(matched)

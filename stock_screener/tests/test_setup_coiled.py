@@ -4,7 +4,8 @@ _root = os.path.dirname(_here)
 sys.path.insert(0, _root)
 sys.path.insert(0, _here)
 import setups
-from fixtures import (contracting_series, flat_series, trend_series,
+from engine import A
+from fixtures import (bar, contracting_series, flat_series, trend_series,
                       turnover_ladder)
 
 
@@ -22,6 +23,22 @@ def taper(n, price=105.0, top=6.0, bottom=0.5):
     return contracting_series(widths, price=price, bars_per_window=1)
 
 
+def up_thrusts(n, first_bar=0):
+    """`n` UP-labelled thrusts on consecutive bars from the START of a series.
+
+    Dated off the first bars rather than the last because every row series in
+    this file -- contracting_series, taper, saw_tooth -- begins on the same day
+    zero, so these dates land inside whichever series a test hands the predicate
+    while the LENGTHS differ from fixture to fixture.
+
+    TWO by default, because the default fixture has to satisfy strict as well as
+    loosened; the boundary between one and two is probed by the tests that build
+    the count deliberately.
+    """
+    return [{"date": str(bar(first_bar + i, 0, 0, 0, 0)["t"]), "dir": "up",
+             "vol": 5_000_000, "x_avg": 3.2} for i in range(n)]
+
+
 def result(**over):
     """A compute()-shaped dict that PASSES coiled. Each test breaks one field."""
     o = {"symbol": "TEST", "price": 108.0,
@@ -29,7 +46,7 @@ def result(**over):
          "ma": {"sma20": 104.0, "sma50": 102.0, "sma100": 100.0, "sma200": 98.0},
          "atr": {"daily": 1.0, "daily_pct": 1.0},
          "volume": {"dryup_ratio": 0.75, "avg20": 1_000_000, "avg50": 1_300_000,
-                    "thrusts": []},
+                    "thrusts": up_thrusts(2)},
          "range": {"hi": 110.0, "lo": 100.0, "bars": 20},
          "hi52": 112.0, "lo52": 70.0,
          "rsi": {"daily": 55.0}, "macd": {"daily": {"hist": 0.2}},
@@ -41,9 +58,14 @@ def result(**over):
 
 
 def ctx(**over):
+    # ud_ratio 1.60 lands on the 1.50-2.00 rung, so fit_accumulation returns 8 --
+    # deliberately NEITHER the top nor the floor of the ladder. A fixture pinned
+    # at 10 would hide a dropped accumulation term behind a full-marks score, and
+    # one pinned at the 2.0 floor would hide it behind the None case.
     c = {"rows": contracting_series([4.0, 2.5, 1.0], price=105.0, bars_per_window=8),
          "rs": {"1m": 1.0, "3m": 5.0},
-         "atr_pctile": 0.20, "sma200_rising": True, "sma50_rising": True}
+         "atr_pctile": 0.20, "sma200_rising": True, "sma50_rising": True,
+         "ud_ratio": 1.60}
     c.update(over)
     return c
 
@@ -244,21 +266,46 @@ class TestCoiledMatches(unittest.TestCase):
         self.assertTrue(0.0 <= loose <= tight <= 10.0)
         self.assertGreater(tight, loose)
 
-    def test_fit_weights_are_forty_thirty_thirty(self):
+    def test_fit_weights_are_thirty_five_twenty_five_twenty_twenty(self):
         """Pins the absolute score, not just the ordering.
 
-        contraction 0.25 -> 10, position 0.80 -> 8, dry-up 0.75 -> 8, so
-        0.4*10 + 0.3*8 + 0.3*8 = 8.8. Any other weighting that preserves the
-        ordering above -- equal thirds, for instance -- lands elsewhere.
+        contraction 0.25 -> 10, position 0.80 -> 8, dry-up 0.75 -> 8,
+        accumulation 1.60 -> 8, so
+        0.35*10 + 0.25*8 + 0.20*8 + 0.20*8 = 3.5 + 2.0 + 1.6 + 1.6 = 8.7.
+        Any other weighting that preserves the ordering above -- equal quarters,
+        for instance, which gives 8.5 -- lands elsewhere.
         """
         self.assertAlmostEqual(setups.fit_coiled(setups.match_coiled(result(), ctx())),
-                               8.8, places=6)
+                               8.7, places=6)
+
+    def test_the_accumulation_term_is_exactly_a_fifth_of_the_score(self):
+        """The new term, isolated. Moving the ratio from the 1.50 rung (8) to
+        the sub-1.00 rung (2) must move the total by 0.20 * 6 = 1.2 and nothing
+        else -- every other input is held.
+
+        Without this the 20% weight is pinned only by the sum above, which any
+        redistribution among four terms could reproduce.
+        """
+        strong = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=1.60)))
+        weak = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=0.80)))
+        self.assertAlmostEqual(strong - weak, 1.2, places=6)
+        self.assertAlmostEqual(weak, 7.5, places=6)
+
+    def test_an_unmeasurable_ratio_scores_the_floor_not_the_top(self):
+        """COILED does NOT gate on the up/down ratio, so a None reaches its fit.
+        It must score the 2.0 floor -- identical to a distributing name, and 6
+        sub-score points below the fixture -- rather than being rewarded for the
+        absence of evidence."""
+        none_ = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=None)))
+        weak = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=0.80)))
+        self.assertAlmostEqual(none_, weak, places=6)
+        self.assertAlmostEqual(none_, 7.5, places=6)
 
     def test_fit_rewards_a_deeper_volume_dryup(self):
         """The dry-up term carries weight of its own; the ordering test above
         varies only the contraction, so a fit that ignored dry-up survived it."""
         wet = result(volume={"dryup_ratio": 0.95, "avg20": 1, "avg50": 1,
-                             "thrusts": []})
+                             "thrusts": up_thrusts(2)})
         self.assertGreater(setups.fit_coiled(setups.match_coiled(result(), ctx())),
                            setups.fit_coiled(setups.match_coiled(wet, ctx())))
 
@@ -295,7 +342,7 @@ class TestCoiledNearMisses(unittest.TestCase):
         self.assertIsNone(setups.match_coiled(result(), ctx(sma200_rising=False)))
 
     def test_no_volume_dryup_rejects(self):
-        o = result(volume={"dryup_ratio": 1.4, "avg20": 1, "avg50": 1, "thrusts": []})
+        o = result(volume={"dryup_ratio": 1.4, "avg20": 1, "avg50": 1, "thrusts": up_thrusts(2)})
         self.assertIsNone(setups.match_coiled(o, ctx()))
 
     # --- conditions the brief's near-misses do not reach --------------------
@@ -320,7 +367,7 @@ class TestCoiledNearMisses(unittest.TestCase):
     def test_missing_dryup_ratio_rejects(self):
         """The `dryup is None` arm. `None >= 1.0` raises on Python 3, so
         deleting this half of the guard is a crash, not a wrong answer."""
-        o = result(volume={"dryup_ratio": None, "avg20": 1, "avg50": 1, "thrusts": []})
+        o = result(volume={"dryup_ratio": None, "avg20": 1, "avg50": 1, "thrusts": up_thrusts(2)})
         self.assertIsNone(setups.match_coiled(o, ctx()))
 
     def test_zero_width_base_rejects_without_dividing_by_zero(self):
@@ -390,10 +437,10 @@ class TestCoiledBoundaries(unittest.TestCase):
 
     def test_dryup_ceiling_is_exclusive(self):
         """`>=`: a ratio of exactly 1.0 is average volume, not a dry-up."""
-        at = result(volume={"dryup_ratio": 1.0, "avg20": 1, "avg50": 1, "thrusts": []})
+        at = result(volume={"dryup_ratio": 1.0, "avg20": 1, "avg50": 1, "thrusts": up_thrusts(2)})
         self.assertIsNone(setups.match_coiled(at, ctx()))
         under = result(volume={"dryup_ratio": 0.999, "avg20": 1, "avg50": 1,
-                               "thrusts": []})
+                               "thrusts": up_thrusts(2)})
         self.assertIsNotNone(setups.match_coiled(under, ctx()))
 
     def test_two_contractions_is_the_floor_and_one_is_not(self):
@@ -548,7 +595,7 @@ class TestCoiledFunnel(unittest.TestCase):
          ctx(rows=taper(20), sma50_rising=False), True),
         ("volume not dried up",
          dict(volume={"dryup_ratio": 1.4, "avg20": 1, "avg50": 1,
-                      "thrusts": []}), ctx(), False),
+                      "thrusts": up_thrusts(2)}), ctx(), False),
     ]
 
     def test_each_condition_records_itself_exactly_once(self):
@@ -642,7 +689,7 @@ class TestCoiledStrict(unittest.TestCase):
                                               strict=True))
         self.assertIsNone(setups.match_coiled(result(price=105.0), c, strict=True))
         wet = result(volume={"dryup_ratio": 0.95, "avg20": 1, "avg50": 1,
-                             "thrusts": []})
+                             "thrusts": up_thrusts(2)})
         self.assertIsNone(setups.match_coiled(wet, c, strict=True))
 
     def test_strict_requires_rising_sma50(self):
@@ -737,6 +784,180 @@ class TestCoiledWindowArithmetic(unittest.TestCase):
                                                "bars": lo}), c)
         self.assertIsNotNone(ev, "the loosened floor is a silent vacuum")
         self.assertEqual(len(ev["widths"]), self.windows_requested())
+
+
+class TestUpThrustCount(unittest.TestCase):
+    """_up_thrust_count in isolation: the label, the window and both ends of it."""
+
+    ROWS = trend_series(30)
+
+    def obj(self, thrusts):
+        return {"volume": {"thrusts": thrusts}}
+
+    def thrust(self, index, direction):
+        return {"date": str(self.ROWS[index]["t"]), "dir": direction,
+                "vol": 5_000_000, "x_avg": 3.1}
+
+    def test_no_thrusts_at_all_counts_zero(self):
+        self.assertEqual(setups._up_thrust_count(self.obj([]), self.ROWS, 10), 0)
+
+    def test_an_up_thrust_inside_the_window_counts(self):
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-1, "up")]), self.ROWS, 10), 1)
+
+    def test_a_down_thrust_does_not_count(self):
+        """The direction label is READ, not ignored. A distribution day on 3x
+        volume is the opposite of accumulation, and counting it would let the
+        gate be satisfied by exactly the bar it exists to exclude."""
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-1, "down")]), self.ROWS, 10), 0)
+
+    def test_several_up_thrusts_are_added_up(self):
+        """Not a boolean wearing a number's clothes: strict asks for two."""
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-1, "up"),
+                                              self.thrust(-4, "up"),
+                                              self.thrust(-6, "down")]),
+                                    self.ROWS, 10), 2)
+
+    def test_the_oldest_bar_in_the_window_counts(self):
+        """Window boundary, INSIDE edge: rows[-bars] is the first bar counted."""
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-10, "up")]), self.ROWS, 10), 1)
+
+    def test_one_bar_outside_the_window_does_not(self):
+        """Window boundary, OUTSIDE edge. Paired with the test above, so a
+        one-bar-wide slice error cannot survive either alone."""
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-11, "up")]), self.ROWS, 10), 0)
+
+    def test_the_window_is_the_argument_not_a_constant(self):
+        o = self.obj([self.thrust(-5, "up")])
+        self.assertEqual(setups._up_thrust_count(o, self.ROWS, 10), 1)
+        self.assertEqual(setups._up_thrust_count(o, self.ROWS, 3), 0)
+
+    def test_a_non_positive_window_counts_nothing(self):
+        """rows[-0:] is the WHOLE series, so an unguarded zero would count every
+        thrust on record and report it as "the last no bars"."""
+        o = self.obj([self.thrust(-1, "up")])
+        self.assertEqual(setups._up_thrust_count(o, self.ROWS, 0), 0)
+        self.assertEqual(setups._up_thrust_count(o, self.ROWS, -5), 0)
+
+    def test_no_rows_counts_nothing(self):
+        """No dates to compare against, so nothing can be inside the window --
+        and it must not raise."""
+        self.assertEqual(
+            setups._up_thrust_count(self.obj([self.thrust(-1, "up")]), [], 10), 0)
+
+    def test_a_missing_thrust_list_counts_nothing_rather_than_raising(self):
+        self.assertEqual(setups._up_thrust_count({"volume": {}}, self.ROWS, 10), 0)
+
+    def test_a_thrust_without_a_direction_is_not_counted_as_up(self):
+        """`.get("dir") == "up"`, so a malformed record fails the gate rather
+        than opening it."""
+        o = self.obj([{"date": str(self.ROWS[-1]["t"]), "vol": 5_000_000}])
+        self.assertEqual(setups._up_thrust_count(o, self.ROWS, 10), 0)
+
+
+class TestCoiledNeedsPriorAccumulation(unittest.TestCase):
+    """A base nobody ever bought is a dead stock, not a coiled spring."""
+
+    def test_a_base_with_no_up_thrust_rejects(self):
+        o = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                           "avg50": 1_300_000, "thrusts": []})
+        self.assertIsNone(setups.match_coiled(o, ctx()))
+
+    def test_one_up_thrust_is_enough_loosened(self):
+        o = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                           "avg50": 1_300_000, "thrusts": up_thrusts(1)})
+        self.assertIsNotNone(setups.match_coiled(o, ctx()))
+
+    def test_one_up_thrust_is_not_enough_strict(self):
+        """The two modes must actually differ here, or the strict pair is
+        decorative. taper(20) contracts under every tail slice, so strict's
+        3-of-3 contraction requirement is satisfied and the count is the only
+        thing left to reject on."""
+        one = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                             "avg50": 1_300_000, "thrusts": up_thrusts(1)})
+        two = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                             "avg50": 1_300_000, "thrusts": up_thrusts(2)})
+        c = ctx(rows=taper(20))
+        self.assertIsNotNone(setups.match_coiled(one, c))
+        self.assertIsNone(setups.match_coiled(one, c, strict=True))
+        self.assertIsNotNone(setups.match_coiled(two, c, strict=True))
+
+    def test_a_down_thrust_does_not_satisfy_the_gate(self):
+        """A base that only ever traded size on the way DOWN has been
+        distributed, not accumulated."""
+        down = [dict(t, dir="down") for t in up_thrusts(2)]
+        o = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                           "avg50": 1_300_000, "thrusts": down})
+        self.assertIsNone(setups.match_coiled(o, ctx()))
+
+    def test_a_thrust_older_than_the_lookback_does_not_count(self):
+        """Both ends of the 126-bar window, on a series long enough to have an
+        outside. A 140-bar taper puts rows[13] outside and rows[14] inside."""
+        rows = taper(140)
+        inside = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                                "avg50": 1_300_000,
+                                "thrusts": up_thrusts(1, first_bar=14)})
+        outside = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                                 "avg50": 1_300_000,
+                                 "thrusts": up_thrusts(1, first_bar=13)})
+        self.assertIsNotNone(setups.match_coiled(inside, ctx(rows=rows)))
+        self.assertIsNone(setups.match_coiled(outside, ctx(rows=rows)))
+
+    def test_the_count_reads_the_rows_it_is_given_not_a_stashed_key(self):
+        """The predicate passes ctx["rows"]; a name whose thrusts are dated
+        outside that series must reject. Without this the argument could be
+        replaced by o["_rows"] -- which the COILED fixtures do not set -- and
+        every test here would still pass by counting nothing at all.
+        """
+        o = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                           "avg50": 1_300_000,
+                           "thrusts": [{"date": "1999-01-04", "dir": "up",
+                                        "vol": 5_000_000, "x_avg": 3.1}]})
+        self.assertIsNone(setups.match_coiled(o, ctx()))
+
+    def test_the_rejection_names_the_up_thrust_condition(self):
+        diag = {}
+        o = result(volume={"dryup_ratio": 0.75, "avg20": 1_000_000,
+                           "avg50": 1_300_000, "thrusts": []})
+        setups.match_coiled(o, ctx(), diag=diag)
+        (label, _), = diag.items()
+        self.assertIn("up-thrust", label)
+
+    def test_the_gate_is_the_last_one_the_predicate_applies(self):
+        """Funnel position, so the report reads in predicate order. A name that
+        fails BOTH the dry-up and the thrust count must be recorded at the
+        dry-up, which comes first."""
+        diag = {}
+        o = result(volume={"dryup_ratio": 1.4, "avg20": 1_000_000,
+                           "avg50": 1_300_000, "thrusts": []})
+        setups.match_coiled(o, ctx(), diag=diag)
+        (label, (step, _)), = diag.items()
+        self.assertIn("dried up", label)
+        self.assertEqual(step, 11)
+
+
+class TestCoiledUpThrustLookback(unittest.TestCase):
+    def test_the_lookback_is_the_atr_percentile_window(self):
+        """126 is not an arbitrary number: "quiet against its own six months"
+        and "accumulated at some point in those six months" have to describe one
+        span, or the two halves of the setup are talking about different bases.
+        """
+        self.assertEqual(setups.UP_THRUST_BARS, setups.ATR_PCTILE_BARS)
+
+    def test_the_engine_supplies_no_thrust_older_than_its_own_window(self):
+        """The arithmetic note in the code, asserted rather than asserted-in-a-
+        comment. analyze.detect_thrusts scans a 90-bar window, so nothing older
+        than 90 bars exists to be counted and the effective lookback today is 90
+        whatever this constant says. Our window must be at least as wide as the
+        engine's, or we would be discarding labels the engine did supply.
+        """
+        import inspect
+        window = inspect.signature(A.detect_thrusts).parameters["window"].default
+        self.assertLessEqual(window, setups.UP_THRUST_BARS)
 
 
 if __name__ == "__main__":
