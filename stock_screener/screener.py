@@ -471,10 +471,22 @@ def parse_args(argv):
                    default=None, metavar="PATH",
                    help="write every match to a CSV; bare flag uses "
                         "./%s/scan_<date>.csv" % csv_export.DEFAULT_DIR)
+    p.add_argument("--csv-per-setup", action="store_true", dest="csv_per_setup",
+                   help="also write one file per matched setup, named from the "
+                        "--csv path (scan_<date>_COILED.csv); requires --csv")
     p.add_argument("--append", action="store_true",
                    help="append to the CSV instead of overwriting it")
     p.add_argument("--refresh-universe", action="store_true", dest="refresh")
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    # A usage error, not a silent no-op. --csv-per-setup names its files FROM
+    # the --csv path, so alone it has no base to build on and nothing to split;
+    # accepting it quietly would leave a user who mistyped the pair staring at a
+    # directory that never got the files they asked for, with a zero exit code
+    # telling them it worked. p.error prints the usage line and exits 2.
+    if a.csv_per_setup and a.csv is None:
+        p.error("--csv-per-setup requires --csv: the per-setup files are named "
+                "from the --csv path, so there is no base path without it")
+    return a
 
 
 def resolve_setups(spec):
@@ -520,14 +532,21 @@ def main(argv=None):
     # terminal, never the file.
     if a.csv is not None:
         path = csv_export.resolve_path(a.csv, scan_date)
-        written = csv_export.write_csv(
-            path,
-            csv_export.build_rows(rows, by_setup, chosen, scan_date, closed,
-                                  csv_export.universe_label(a.universe),
-                                  csv_export.mode_label(a.strict)),
-            append=a.append)
+        csv_rows = csv_export.build_rows(rows, by_setup, chosen, scan_date,
+                                         closed,
+                                         csv_export.universe_label(a.universe),
+                                         csv_export.mode_label(a.strict))
+        written = csv_export.write_csv(path, csv_rows, append=a.append)
         # stderr, so --json --csv together still emits parseable JSON on stdout.
         print("wrote %d rows to %s" % (written, path), file=sys.stderr)
+        if a.csv_per_setup:
+            # After the combined file and from the SAME rows: the split is
+            # additive, and a second build_rows call could drift from the first.
+            # One line per file so the user can see which setups produced one --
+            # and, by their absence, which produced nothing.
+            for sub_path, n in csv_export.write_per_setup(path, csv_rows,
+                                                          append=a.append):
+                print("wrote %d rows to %s" % (n, sub_path), file=sys.stderr)
 
     if a.json:
         print(json.dumps({

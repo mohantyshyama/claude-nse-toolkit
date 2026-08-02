@@ -1211,6 +1211,242 @@ class TestResolvePath(unittest.TestCase):
                       csv_export.default_path("2026-08-02"))
 
 
+# -------------------------------------------------------------- per-setup split
+
+class TestPerSetupPath(unittest.TestCase):
+    """The naming: the setup goes BEFORE the extension."""
+
+    def test_the_setup_lands_before_the_extension(self):
+        self.assertEqual(
+            csv_export.per_setup_path("scans/scan_2026-08-02.csv", "COILED"),
+            "scans/scan_2026-08-02_COILED.csv")
+
+    def test_the_result_is_still_a_csv_to_a_glob_or_a_spreadsheet(self):
+        """`scan.csv_COILED` opens in nothing and matches `*.csv` in nothing.
+        This is the assertion a naive `base + "_" + setup` fails."""
+        got = csv_export.per_setup_path("scans/scan_2026-08-02.csv", "BREAKOUT")
+        self.assertTrue(got.endswith(".csv"), got)
+        self.assertNotIn(".csv_", got)
+
+    def test_the_directory_is_preserved_not_flattened(self):
+        got = csv_export.per_setup_path("/a/b/out.csv", "TURN")
+        self.assertEqual(os.path.dirname(got), "/a/b")
+
+    def test_a_dot_in_the_directory_name_is_not_mistaken_for_an_extension(self):
+        """`os.path.splitext` is directory-aware; a hand-rolled `rfind('.')`
+        would split `/a.b/out` in the wrong place."""
+        self.assertEqual(csv_export.per_setup_path("/a.b/out.csv", "LEADER"),
+                         "/a.b/out_LEADER.csv")
+
+    def test_a_base_with_no_extension_gains_none(self):
+        """The user named the file they wanted; inventing `.csv` for the
+        siblings would be the surprise."""
+        self.assertEqual(csv_export.per_setup_path("out", "COILED"),
+                         "out_COILED")
+
+    def test_a_non_csv_extension_is_carried_through_verbatim(self):
+        self.assertEqual(csv_export.per_setup_path("out.txt", "COILED"),
+                         "out_COILED.txt")
+
+    def test_every_setup_gets_a_distinct_path(self):
+        """Six setups, six filenames. Two colliding would silently overwrite."""
+        names = list(setups.SETUPS) + ["CONFLUENCE"]
+        paths = [csv_export.per_setup_path("scans/s.csv", n) for n in names]
+        self.assertEqual(len(set(paths)), len(names))
+
+    def test_the_setup_name_is_upper_case_as_the_column_writes_it(self):
+        """So the filename and the setup_name column read the same, and a
+        case-sensitive filesystem does not end up with two files per setup."""
+        self.assertIn("_COILED.csv",
+                      csv_export.per_setup_path("s.csv", "COILED"))
+
+
+class TestGroupBySetup(unittest.TestCase):
+    def _rows(self):
+        return build([scanned("A", ("COILED", "LEADER")),
+                      scanned("B", ("COILED", "LEADER"))],
+                     {"COILED": [result("A", evidence=dict(COILED_EV)),
+                                 result("B", evidence=dict(COILED_EV))],
+                      "LEADER": [result("A")]},
+                     ["COILED", "LEADER"])
+
+    def test_rows_are_grouped_under_their_own_setup(self):
+        groups = csv_export.group_by_setup(self._rows())
+        self.assertEqual([name for name, _ in groups], ["COILED", "LEADER"])
+        self.assertEqual([len(g) for _, g in groups], [2, 1])
+
+    def test_each_group_holds_only_that_setups_rows(self):
+        """The assertion a grouping that handed every group the whole list
+        fails. Asserted on the setup_name column of every row, not on counts."""
+        for name, group in csv_export.group_by_setup(self._rows()):
+            self.assertEqual({r["setup_name"] for r in group}, {name})
+
+    def test_a_setup_with_no_rows_gets_no_group_at_all(self):
+        """Not an empty one. This is where "no matches writes no file" comes
+        from: it falls out of the data, not out of a branch."""
+        rows = build([scanned("A")], {"LEADER": [result("A")], "TURN": []},
+                     ["LEADER", "TURN"])
+        groups = csv_export.group_by_setup(rows)
+        self.assertEqual([name for name, _ in groups], ["LEADER"])
+        self.assertNotIn("TURN", [name for name, _ in groups])
+
+    def test_no_row_is_lost_or_duplicated_by_the_split(self):
+        rows = self._rows()
+        regrouped = [r for _, g in csv_export.group_by_setup(rows) for r in g]
+        self.assertEqual(len(regrouped), len(rows))
+        self.assertEqual(sorted(map(id, regrouped)), sorted(map(id, rows)))
+
+    def test_the_group_order_follows_the_combined_files_order(self):
+        """Reversed input, reversed groups: the listing reads down in the same
+        order as the file it was split from."""
+        rows = build([scanned("A", ("COILED", "LEADER"))],
+                     {"COILED": [result("A", evidence=dict(COILED_EV))],
+                      "LEADER": [result("A")]},
+                     ["LEADER", "COILED"])
+        self.assertEqual([n for n, _ in csv_export.group_by_setup(rows)],
+                         ["LEADER", "COILED"])
+
+    def test_an_empty_scan_groups_into_nothing(self):
+        self.assertEqual(csv_export.group_by_setup([]), [])
+
+
+class TestWritePerSetup(unittest.TestCase):
+    def _rows(self):
+        """Two COILED, one LEADER, nothing else -- so a file written with ALL
+        the rows, or one written for a setup that matched nothing, is visible."""
+        return build([scanned("A", ("COILED", "LEADER")),
+                      scanned("B", ("COILED",))],
+                     {"COILED": [result("A", evidence=dict(COILED_EV)),
+                                 result("B", evidence=dict(COILED_EV))],
+                      "LEADER": [result("A")],
+                      "TURN": []},
+                     ["COILED", "LEADER", "TURN"])
+
+    def test_one_file_per_matched_setup_with_its_row_count(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan_2026-08-02.csv")
+            got = csv_export.write_per_setup(base, self._rows())
+            self.assertEqual(got, [
+                (os.path.join(d, "scan_2026-08-02_COILED.csv"), 2),
+                (os.path.join(d, "scan_2026-08-02_LEADER.csv"), 1)])
+
+    def test_each_file_holds_only_its_own_setups_rows(self):
+        """The mutant this kills writes every row into every file: the counts
+        would still be positive and every file would still parse."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, self._rows())
+            coiled = read_back(os.path.join(d, "s_COILED.csv"))
+            leader = read_back(os.path.join(d, "s_LEADER.csv"))
+            self.assertEqual([r["setup_name"] for r in coiled],
+                             ["COILED", "COILED"])
+            self.assertEqual([r["symbol"] for r in coiled], ["A", "B"])
+            self.assertEqual([r["setup_name"] for r in leader], ["LEADER"])
+            self.assertEqual([r["symbol"] for r in leader], ["A"])
+
+    def test_a_setup_with_no_matches_writes_no_file_at_all(self):
+        """Not a header-only one. An empty file in the directory reads as "the
+        scan produced nothing" when it means "this setup matched nothing"."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, self._rows())
+            self.assertFalse(os.path.exists(os.path.join(d, "s_TURN.csv")))
+            self.assertEqual(sorted(os.listdir(d)),
+                             ["s_COILED.csv", "s_LEADER.csv"])
+
+    def test_a_scan_that_matched_nothing_writes_no_per_setup_files(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            self.assertEqual(csv_export.write_per_setup(base, []), [])
+            self.assertEqual(os.listdir(d), [])
+
+    def test_the_combined_file_is_not_written_by_this_function(self):
+        """It is the caller's, written before this runs. Writing it here too
+        would double the row count reported for the scan."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, self._rows())
+            self.assertFalse(os.path.exists(base))
+
+    def test_every_file_carries_the_full_thirty_one_column_header(self):
+        """A slice of the columns would make the per-setup files a different
+        schema from the combined one, and no reader could union them."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            for path, _ in csv_export.write_per_setup(base, self._rows()):
+                with open(path, newline="", encoding="utf-8") as fh:
+                    self.assertEqual(csvmod.DictReader(fh).fieldnames,
+                                     EXPECTED_COLUMNS, path)
+
+    def test_the_rows_are_byte_identical_to_the_combined_files_own(self):
+        """Same rows, same rounding, same order -- a split, not a re-render."""
+        rows = self._rows()
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_csv(base, rows)
+            csv_export.write_per_setup(base, rows)
+            combined = raw_lines(base)
+            for path, _ in csv_export.write_per_setup(base, rows):
+                body = raw_lines(path)[1:]
+                for line in body:
+                    self.assertIn(line, combined[1:], path)
+
+    def test_ranks_inside_a_per_setup_file_stay_the_scans_own(self):
+        """Not renumbered 1..n by the split: the file has to reproduce the
+        terminal table, and a re-rank would quietly invent a new ordering."""
+        syms = ["S%02d" % i for i in range(3)]
+        rows = build([scanned(s) for s in syms],
+                     {"LEADER": [result(s) for s in syms]}, ["LEADER"])
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, rows)
+            back = read_back(os.path.join(d, "s_LEADER.csv"))
+            self.assertEqual([r["rank_within_setup"] for r in back],
+                             ["1", "2", "3"])
+
+    def test_a_missing_parent_directory_is_created_for_the_siblings_too(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "nested", "s.csv")
+            csv_export.write_per_setup(base, self._rows())
+            self.assertTrue(os.path.exists(os.path.join(d, "nested",
+                                                        "s_COILED.csv")))
+
+    def test_overwriting_replaces_a_stale_per_setup_file(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, self._rows())
+            later = build([scanned("Z", ("COILED",))],
+                          {"COILED": [result("Z", evidence=dict(COILED_EV))]},
+                          ["COILED"])
+            csv_export.write_per_setup(base, later)
+            self.assertEqual(
+                [r["symbol"] for r in read_back(os.path.join(d, "s_COILED.csv"))],
+                ["Z"])
+
+    def test_append_reaches_the_per_setup_files_as_well(self):
+        """One flag governs the run: a --append scan must not leave the
+        combined file growing while its siblings are truncated."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            csv_export.write_per_setup(base, self._rows(), append=True)
+            later = build([scanned("Z", ("COILED",))],
+                          {"COILED": [result("Z", evidence=dict(COILED_EV))]},
+                          ["COILED"])
+            csv_export.write_per_setup(base, later, append=True)
+            path = os.path.join(d, "s_COILED.csv")
+            self.assertEqual([r["symbol"] for r in read_back(path)],
+                             ["A", "B", "Z"])
+            self.assertEqual(sum(1 for l in raw_lines(path)
+                                 if l.startswith("scan_date,")), 1)
+
+    def test_the_returned_counts_are_the_rows_really_on_disk(self):
+        """Counted off the files, not off the return value that claims them."""
+        with tmpdir() as d:
+            base = os.path.join(d, "s.csv")
+            for path, n in csv_export.write_per_setup(base, self._rows()):
+                self.assertEqual(len(read_back(path)), n, path)
+
+
 # ------------------------------------------------------------------------ CLI
 
 class TestCsvArgs(unittest.TestCase):
@@ -1254,6 +1490,75 @@ class TestCsvArgs(unittest.TestCase):
             screener.parse_args(["--help"])
         self.assertIn("--csv", buf.getvalue())
         self.assertIn("scans", buf.getvalue())
+
+
+class TestCsvPerSetupArgs(unittest.TestCase):
+    def _err(self, argv):
+        buf = io.StringIO()
+        with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+            screener.parse_args(argv)
+        return cm.exception.code, buf.getvalue()
+
+    def test_it_defaults_off(self):
+        self.assertFalse(screener.parse_args([]).csv_per_setup)
+
+    def test_it_is_a_flag_that_takes_no_value(self):
+        a = screener.parse_args(["--csv", "o.csv", "--csv-per-setup"])
+        self.assertTrue(a.csv_per_setup)
+        self.assertEqual(a.csv, "o.csv")
+
+    def test_it_composes_with_a_bare_csv_flag(self):
+        a = screener.parse_args(["--csv", "--csv-per-setup"])
+        self.assertIs(a.csv, csv_export.DEFAULT_PATH)
+        self.assertTrue(a.csv_per_setup)
+
+    def test_it_composes_with_append_and_the_scan_flags(self):
+        a = screener.parse_args(["--csv", "o.csv", "--csv-per-setup",
+                                 "--append", "--strict", "--setup", "coiled"])
+        self.assertTrue(a.csv_per_setup)
+        self.assertTrue(a.append)
+        self.assertTrue(a.strict)
+        self.assertEqual(a.setup, "coiled")
+
+    def test_without_csv_it_is_a_usage_error_not_a_silent_no_op(self):
+        """The whole point: a user who mistyped the pair must not get exit 0
+        and a directory with none of the files they asked for."""
+        code, err = self._err(["--csv-per-setup"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("--csv-per-setup", err)
+        self.assertIn("--csv", err)
+
+    def test_the_error_says_why_rather_than_only_that_it_failed(self):
+        _, err = self._err(["--csv-per-setup"])
+        self.assertIn("requires --csv", err)
+
+    def test_the_usage_error_survives_the_other_flags_being_present(self):
+        """It is the ABSENCE of --csv that is the error, not some interaction
+        with a bare argv. --strict and --append do not repair it."""
+        for extra in (["--strict"], ["--append"], ["--json"],
+                      ["--setup", "coiled"]):
+            with self.subTest(extra=extra):
+                code, err = self._err(["--csv-per-setup"] + extra)
+                self.assertNotEqual(code, 0)
+                self.assertIn("requires --csv", err)
+
+    def test_csv_alone_is_still_perfectly_legal(self):
+        """The other arm of the guard: --csv without --csv-per-setup is the
+        ordinary case and must not have become an error."""
+        a = screener.parse_args(["--csv", "o.csv"])
+        self.assertEqual(a.csv, "o.csv")
+        self.assertFalse(a.csv_per_setup)
+
+    def test_neither_flag_is_legal_too(self):
+        a = screener.parse_args([])
+        self.assertIsNone(a.csv)
+        self.assertFalse(a.csv_per_setup)
+
+    def test_the_help_text_names_the_flag_and_its_dependency(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit):
+            screener.parse_args(["--help"])
+        self.assertIn("--csv-per-setup", buf.getvalue())
 
 
 # ------------------------------------------------------- main(), offline rig
@@ -1555,6 +1860,219 @@ class TestMainCsv(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertEqual(read_back(path)[0]["scan_date"],
                              today.strftime("%d-%b-%Y"))
+
+
+class TestMainCsvPerSetup(unittest.TestCase):
+    """--csv --csv-per-setup end to end through main()."""
+
+    def _two_setups(self, n=3):
+        """n names matching LEADER, the first two also COILED -- so the two
+        files must differ in length as well as in content."""
+        out = []
+        for i in range(n):
+            matched = {"LEADER": dict({"fit": 8.0,
+                                       "evidence": dict(LEADER_EV)},
+                                      **volume())}
+            if i < 2:
+                matched["COILED"] = dict({"fit": 7.0,
+                                          "evidence": dict(COILED_EV)},
+                                         **volume())
+            out.append(scan_row("SYM%d" % i, total=9.0 - i, matched=matched))
+        return out
+
+    def test_the_combined_file_is_still_written_alongside_the_split(self):
+        """Additional, not a replacement. A split that consumed the combined
+        file would leave a reader who wants the whole scan with nothing."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            rc, _, err = run_main(["--setup", "leader,coiled", "--csv", base,
+                                   "--csv-per-setup"], self._two_setups())
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(base), err)
+            self.assertEqual(len(read_back(base)), 5)
+
+    def test_one_file_per_matched_setup_lands_beside_it(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "leader,coiled", "--csv", base,
+                      "--csv-per-setup"], self._two_setups())
+            self.assertEqual(sorted(os.listdir(d)),
+                             ["scan.csv", "scan_COILED.csv",
+                              "scan_LEADER.csv"])
+
+    def test_each_file_carries_only_its_own_setups_rows(self):
+        """The mutant this kills writes the whole scan into every file: both
+        files would exist, both would parse, both would be non-empty."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "leader,coiled", "--csv", base,
+                      "--csv-per-setup"], self._two_setups())
+            leader = read_back(os.path.join(d, "scan_LEADER.csv"))
+            coiled = read_back(os.path.join(d, "scan_COILED.csv"))
+            self.assertEqual({r["setup_name"] for r in leader}, {"LEADER"})
+            self.assertEqual({r["setup_name"] for r in coiled}, {"COILED"})
+            self.assertEqual(len(leader), 3)
+            self.assertEqual(len(coiled), 2)
+
+    def test_the_two_files_reunion_is_exactly_the_combined_file(self):
+        """Nothing dropped, nothing duplicated, nothing re-rendered."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "leader,coiled", "--csv", base,
+                      "--csv-per-setup"], self._two_setups())
+            parts = []
+            for name in ("COILED", "LEADER"):
+                parts += raw_lines(os.path.join(d, "scan_%s.csv" % name))[1:]
+            self.assertEqual(sorted(parts), sorted(raw_lines(base)[1:]))
+
+    def test_a_setup_that_matched_nothing_gets_no_file(self):
+        """--setup all over a scan where only LEADER and COILED matched: four
+        setups produced nothing and four files must be absent, not empty."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "all", "--csv", base, "--csv-per-setup"],
+                     self._two_setups())
+            written = set(os.listdir(d))
+            self.assertIn("scan_LEADER.csv", written)
+            self.assertIn("scan_COILED.csv", written)
+            for name in ("BREAKOUT", "PULLBACK", "TURN"):
+                self.assertNotIn("scan_%s.csv" % name, written,
+                                 "%s matched nothing" % name)
+
+    def test_a_scan_that_matched_nothing_writes_only_the_headed_combined_file(self):
+        """The two rules meeting: the combined file still says "nothing
+        matched" in a parseable shape, and no per-setup file claims to."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            rc, _, _ = run_main(["--setup", "all", "--csv", base,
+                                 "--csv-per-setup"],
+                                [scan_row("A", matched={})])
+            self.assertEqual(rc, 0)
+            self.assertEqual(os.listdir(d), ["scan.csv"])
+            self.assertEqual(raw_lines(base), [",".join(EXPECTED_COLUMNS)])
+
+    def test_every_per_setup_file_carries_the_same_thirty_one_columns(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "leader,coiled", "--csv", base,
+                      "--csv-per-setup"], self._two_setups())
+            for name in ("COILED", "LEADER"):
+                path = os.path.join(d, "scan_%s.csv" % name)
+                self.assertEqual(raw_lines(path)[0], ",".join(EXPECTED_COLUMNS))
+
+    def test_one_line_per_file_written_naming_it_and_its_row_count(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            _, _, err = run_main(["--setup", "leader,coiled", "--csv", base,
+                                  "--csv-per-setup"], self._two_setups())
+            self.assertIn("wrote 5 rows to %s" % base, err)
+            self.assertIn("wrote 2 rows to %s"
+                          % os.path.join(d, "scan_COILED.csv"), err)
+            self.assertIn("wrote 3 rows to %s"
+                          % os.path.join(d, "scan_LEADER.csv"), err)
+
+    def test_the_notice_names_no_file_that_was_not_written(self):
+        """The absence has to be visible in the output too, not only on disk."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            _, _, err = run_main(["--setup", "all", "--csv", base,
+                                  "--csv-per-setup"], self._two_setups())
+            for name in ("BREAKOUT", "PULLBACK", "TURN"):
+                self.assertNotIn("scan_%s.csv" % name, err)
+
+    def test_the_notices_go_to_stderr_so_json_stays_parseable(self):
+        import json
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            rc, out, err = run_main(["--setup", "leader,coiled", "--json",
+                                     "--csv", base, "--csv-per-setup"],
+                                    self._two_setups())
+            self.assertEqual(rc, 0)
+            json.loads(out)
+            self.assertNotIn("scan_LEADER.csv", out)
+            self.assertIn("scan_LEADER.csv", err)
+
+    def test_without_the_flag_no_per_setup_file_appears(self):
+        """The other arm: --csv alone still writes exactly one file."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "leader,coiled", "--csv", base],
+                     self._two_setups())
+            self.assertEqual(os.listdir(d), ["scan.csv"])
+
+    def test_the_bare_csv_flag_names_the_siblings_from_the_dated_default(self):
+        import datetime as _dt
+        today = _dt.date.today().isoformat()
+        with tmpdir() as d, chdir(d):
+            run_main(["--setup", "leader,coiled", "--csv", "--csv-per-setup"],
+                     self._two_setups())
+            self.assertEqual(
+                sorted(os.listdir("scans")),
+                ["scan_%s.csv" % today,
+                 "scan_%s_COILED.csv" % today,
+                 "scan_%s_LEADER.csv" % today])
+
+    def test_the_setup_filter_reaches_the_split(self):
+        """--setup coiled writes the COILED file and no LEADER one, even though
+        the names also matched LEADER."""
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            run_main(["--setup", "coiled", "--csv", base, "--csv-per-setup"],
+                     self._two_setups())
+            self.assertEqual(sorted(os.listdir(d)),
+                             ["scan.csv", "scan_COILED.csv"])
+
+    def test_the_twenty_row_cap_applies_to_each_per_setup_file(self):
+        """The same ceiling, not a fresh uncapped path: 31 LEADER matches give
+        20 rows in the combined file and the same 20 in the split."""
+        rows = [scan_row("SYM%02d" % i, total=9.0 - i * 0.1) for i in range(31)]
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            _, _, err = run_main(["--setup", "leader", "--csv", base,
+                                  "--csv-per-setup"], rows)
+            per = read_back(os.path.join(d, "scan_LEADER.csv"))
+            self.assertEqual(len(per), csv_export.MAX_ROWS_PER_SETUP)
+            self.assertEqual([int(r["rank_within_setup"]) for r in per],
+                             list(range(1, 21)))
+            self.assertEqual([r["symbol"] for r in per],
+                             ["SYM%02d" % i for i in range(20)])
+            self.assertIn("wrote 20 rows to %s"
+                          % os.path.join(d, "scan_LEADER.csv"), err)
+
+    def test_append_reaches_the_split_across_two_runs(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            argv = ["--setup", "leader", "--csv", base, "--csv-per-setup",
+                    "--append"]
+            run_main(argv, [scan_row("FIRST")])
+            run_main(argv, [scan_row("LATER")])
+            path = os.path.join(d, "scan_LEADER.csv")
+            self.assertEqual([r["symbol"] for r in read_back(path)],
+                             ["FIRST", "LATER"])
+            self.assertEqual(sum(1 for l in raw_lines(path)
+                                 if l.startswith("scan_date,")), 1)
+
+    def test_without_append_the_second_run_replaces_the_split_too(self):
+        with tmpdir() as d:
+            base = os.path.join(d, "scan.csv")
+            argv = ["--setup", "leader", "--csv", base, "--csv-per-setup"]
+            run_main(argv, [scan_row("FIRST")])
+            run_main(argv, [scan_row("LATER")])
+            self.assertEqual(
+                [r["symbol"] for r in
+                 read_back(os.path.join(d, "scan_LEADER.csv"))],
+                ["LATER"])
+
+    def test_the_flag_without_csv_exits_non_zero_before_any_scan_runs(self):
+        """End to end, not only through parse_args: main() must not scan the
+        universe and then discard the work."""
+        with tmpdir() as d, chdir(d):
+            buf = io.StringIO()
+            with redirect_stderr(buf), self.assertRaises(SystemExit) as cm:
+                screener.main(["--csv-per-setup"])
+            self.assertNotEqual(cm.exception.code, 0)
+            self.assertIn("requires --csv", buf.getvalue())
+            self.assertEqual(os.listdir(d), [])
 
 
 class TestLiveSmoke(unittest.TestCase):

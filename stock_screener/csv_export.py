@@ -256,6 +256,72 @@ def resolve_path(value, scan_date, base="."):
     return value
 
 
+def per_setup_path(base_path, setup):
+    """`scans/scan_2026-08-02.csv` + COILED -> `scans/scan_2026-08-02_COILED.csv`.
+
+    The setup goes before the extension, not after it: `scan.csv_COILED` is not
+    a CSV to any spreadsheet, file manager or glob, and the whole point of the
+    split is a file the reader can double-click.
+
+    The extension is whatever the base carried, copied verbatim rather than
+    forced to `.csv`. `--csv out.txt --csv-per-setup` gives `out_COILED.txt`:
+    the user named the format they wanted and the per-setup files are the same
+    format, so inventing a different suffix for them would be the surprise.
+    A base with no extension at all yields none, for the same reason.
+    """
+    stem, ext = os.path.splitext(base_path)
+    return "%s_%s%s" % (stem, setup, ext)
+
+
+def group_by_setup(rows):
+    """Built rows -> [(setup, its rows)], in the order the setups first appear.
+
+    Grouped off the ROWS, never off setups.SETUPS or the `chosen` list: a setup
+    that matched nothing has no rows here and therefore no entry, which is what
+    makes "no matches writes no file" fall out of the data rather than out of a
+    branch someone can forget. The ordering is the combined file's own, so the
+    listing of per-setup files reads down in the same order as the file they
+    were split from.
+    """
+    groups = {}
+    order = []
+    for row in rows:
+        name = row["setup_name"]
+        if name not in groups:
+            groups[name] = []
+            order.append(name)
+        groups[name].append(row)
+    return [(name, groups[name]) for name in order]
+
+
+def write_per_setup(base_path, rows, append=False):
+    """One file per setup PRESENT IN `rows`. Returns [(path, row count)].
+
+    Additional to the combined file, never a replacement: the caller writes
+    both. A reader who wants the whole scan opens one file; a reader working a
+    single setup opens theirs, and neither has to filter the other's.
+
+    A setup with no matches gets NO FILE, not a header-only one. An empty
+    `scan_2026-08-02_TURN.csv` sitting in the directory reads as "the scan
+    produced nothing" to anyone who opens it, when what happened is that TURN
+    matched nothing while COILED matched eleven. Absence is the honest form of
+    that, and it is legible next to the sibling files that do exist.
+
+    This is also why the combined file is written unconditionally and this one
+    is not: the combined file is the scan's record, and a scan that matched
+    nothing anywhere is a finding that needs a headed, parseable file to say so.
+    A per-setup file is a slice, and a slice with nothing in it is not a
+    finding, it is an absence.
+
+    `append` is threaded through to match the combined file: one flag governs
+    the run, so a --append scan cannot leave the combined file growing while its
+    per-setup siblings are silently truncated.
+    """
+    return [(per_setup_path(base_path, name),
+             write_csv(per_setup_path(base_path, name), group, append=append))
+            for name, group in group_by_setup(rows)]
+
+
 def _flags(evidence):
     """Pipe-delimited caveats on the row itself.
 
