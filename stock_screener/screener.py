@@ -145,6 +145,23 @@ def build_result_row(row, setup):
             # ratio, and the column must print a dash rather than invent a
             # neutral 1.00.
             "ud_ratio": hit["ud_ratio"],
+            # The same contract, and the same subscript-not-`.get` reasoning,
+            # for the four fields that read the volume picture rather than
+            # merely counting it. ud_weighted is the 50-bar ratio weighted by
+            # where each bar CLOSED in its range, ud_20 the plain ratio over the
+            # last 20 bars; volume_signal and accumulation_trend are the labels
+            # setups.evaluate derives from them. All four sit at the top level
+            # of every matched entry, CONFLUENCE included.
+            #
+            # A `.get(..., "unknown")` here would be strictly worse than a
+            # KeyError: "unknown" is itself a real label meaning "not enough
+            # volume history to say", so a producer that stopped emitting the
+            # key would be indistinguishable from a market with no history --
+            # in every row of every table, silently.
+            "ud_weighted": hit["ud_weighted"],
+            "ud_20": hit["ud_20"],
+            "volume_signal": hit["volume_signal"],
+            "accumulation_trend": hit["accumulation_trend"],
             "match_count": hit["evidence"].get("count", 1),
             "o": o}
 
@@ -199,18 +216,29 @@ EVIDENCE_COLUMNS = {
                    ("Mean Setup Fit", lambda r: _n(r["evidence"]["mean_fit"]))],
 }
 
-# "Up/Down Volume Ratio" is a BASE column, not an evidence slot: it is a
-# universal metric like Risk:Reward -- one number meaning one thing for every
-# name -- rather than one of the two setup-specific facts EVIDENCE_COLUMNS
-# carries. Every table prints it, CONFLUENCE included.
+# The three volume columns are BASE columns, not evidence slots: they are
+# universal metrics like Risk:Reward -- one number or label meaning one thing
+# for every name -- rather than the two setup-specific facts EVIDENCE_COLUMNS
+# carries. Every table prints all three, CONFLUENCE included.
 BASE_COLUMNS = ["Rank", "Symbol", "Sector", "Price", "Setup Fit",
                 "Score Now (catalyst-neutral)", "Score at Trigger",
                 "Risk:Reward", "Relative Strength (3-month)",
                 # Full words, like "Average True Range" and unlike "ATR": a
-                # "U/D Vol" header needs the key to decode it, and it sits
-                # NEXT TO relative strength because both are cross-sectional
+                # "U/D Vol" header needs the key to decode it, and they sit
+                # NEXT TO relative strength because all four are cross-sectional
                 # measures of the same thing -- who has been buying this name.
-                "Up/Down Volume Ratio"]
+                # Kept as one adjacent block for that reason; a Volume Signal
+                # parked away from the ratio it reads reads as an unrelated
+                # verdict rather than as the ratio's interpretation.
+                #
+                # The table is wide and gets wider here. That is the trade: the
+                # ratio alone cannot tell a name being accumulated from one
+                # being distributed INTO strength, and dropping a column to pay
+                # for these would make the table narrower and harder to read,
+                # not easier.
+                "Up/Down Volume Ratio",
+                "Volume Signal",
+                "Accumulation Trend"]
 TAIL_COLUMNS = ["Trigger Price", "Stop (1.5x Average True Range)", "Action"]
 
 
@@ -230,7 +258,15 @@ def render_table(rows, setup, shown, total):
                  # r["ud_ratio"], not r.get(...): build_result_row always sets
                  # it, so a missing key is a bug and must raise rather than
                  # quietly print a dash in every row of every table.
-                 _n(r["ud_ratio"], "{:.2f}")]
+                 _n(r["ud_ratio"], "{:.2f}"),
+                 # The labels go through _n too, on "{}": subscript so a missing
+                 # key still raises, and a None label prints the same `-` every
+                 # other unmeasurable cell prints rather than the word "None".
+                 # (A label that could not be derived arrives as "unknown", not
+                 # None -- the dash is the honest rendering of the third case,
+                 # a row whose producer had nothing at all to say.)
+                 _n(r["volume_signal"], "{}"),
+                 _n(r["accumulation_trend"], "{}")]
         cells += [fmt(r) for _, fmt in ev_cols]
         cells += [_n(r["trigger_price"], "{:.2f}", "none"), _n(r["stop"]), r["action"]]
         lines.append("| " + " | ".join(cells) + " |")
@@ -253,7 +289,23 @@ def render_key(setup):
         "a 1.5x Average True Range stop. Up/Down Volume Ratio is volume on up-closes "
         "divided by volume on down-closes over the last 50 sessions, so above 1.0 means "
         "net accumulation and below 1.0 net distribution; it reads `-` when the stock had "
-        "no down-closes to divide by. Action follows watchlist_analyser's buckets: "
+        "no down-closes to divide by. Volume Signal reads that ratio together with "
+        "where price went and where each bar closed in its own range, because the same "
+        "1.4 means different things in different tapes: `accumulation` is price rising "
+        "and closing strong, genuine buying; `distribution-into-strength` is a name "
+        "whose up/down ratio looks healthy while sellers control every close — price "
+        "drifts up, but institutional supply is being distributed into that strength, "
+        "and it is the case a strong ratio alone would hide; `supported` is price soft "
+        "while buyers defend every dip, often a base forming; `distribution` is "
+        "distribution, unambiguously; `unknown` means there was not enough volume "
+        "history to say. Accumulation Trend compares the up/down ratio over the last 20 "
+        "sessions against the same 50-session number, so `strengthening` means the "
+        "buying is picking up, `steady` means it is unchanged, `flattening` and `fading` "
+        "mean it is losing force, `reversed` means the recent 20 sessions point the "
+        "opposite way from the 50, and `unknown` means one of the two could not be "
+        "measured. The CSV export carries the two raw numbers these labels are read "
+        "from — the close-weighted 50-session ratio and the plain 20-session ratio — "
+        "beside the labels themselves. Action follows watchlist_analyser's buckets: "
         "BUY NOW, BUY HALF, ALERT (vetoed today but the trigger repairs it), LATENT "
         "(below the bands today, but a breakout would qualify it), WATCH (matches the "
         "setup, neither buyable nor repaired by its trigger)."

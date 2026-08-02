@@ -96,6 +96,14 @@ def window_widths(rows, n=3):
 # screened rather than last year's.
 UD_BARS = 50
 
+# Bars the SHORT up/down window is measured over. TWENTY: ~4 weeks, one month of
+# tape. UD_BARS weights all 50 bars equally, so a name that was accumulated 40
+# sessions ago and distributed for the last 10 scores identically to one being
+# accumulated right now -- VIJAYA read 1.70 over 50 bars and 0.52 over 20. The
+# short window is not a better ratio than the long one; it is the SAME ratio
+# asked about a nearer span, and accumulation_trend reads one against the other.
+UD_SHORT_BARS = 20
+
 
 def ud_ratio(rows, n=UD_BARS):
     """Up-close volume divided by down-close volume over the last `n` bars.
@@ -145,6 +153,164 @@ def ud_ratio(rows, n=UD_BARS):
     if down <= 0:
         return None
     return up / down
+
+
+def ud_weighted(rows, n=UD_BARS):
+    """Close-weighted up/down volume ratio over the last `n` bars.
+
+    ud_ratio compares close to PREVIOUS close, so it is blind to WHERE inside
+    its own bar the stock closed. A name can settle +0.1% having traded at its
+    low all session and be recorded as a full day of accumulation. This asks the
+    other question: on the volume that transacted, did the buyers or the sellers
+    own the close?
+
+    Chaikin's money-flow multiplier is the weight:
+
+        m = ((C - L) - (H - C)) / (H - L)
+
+    +1 when the close is exactly at the high, -1 at the low, 0 at the midpoint,
+    and linear in between. `volume * m` goes to the up bucket when m > 0 and
+    `volume * -m` to the down bucket otherwise; the ratio is up / down. A bar
+    closing at its midpoint contributes NOTHING to either side -- m is 0, so the
+    down bucket takes 0.0 -- which is the honest answer: a midpoint close says
+    neither side won it.
+
+    WHY THIS IS NOT A SECOND OPINION ON ud_ratio BUT A DIFFERENT MEASUREMENT.
+    Measured on the live Nifty 500, CONCORDBIO reads ud_ratio 3.74 and this 0.59:
+    buyers lift it intraday and sellers hit the bid into the close, session after
+    session. LALPATHLAB (2.71 / 0.39), HYUNDAI (2.86 / 0.63) and EMCURE
+    (1.56 / 0.53) are the same picture. That is institutional supply being
+    distributed into strength, and no close-to-close ratio can see it.
+
+    ZERO-RANGE BARS ARE SKIPPED, not counted as neutral: H == L makes the
+    multiplier a division by zero, and a limit-up or limit-down bar carries no
+    intrabar information about who owned the close anyway.
+
+    Returns None -- never a division, never an infinity -- when the down bucket
+    is zero or `n` is not positive, exactly as ud_ratio does. Callers treat that
+    None the way they treat ud_ratio's: fit_accumulation scores it the floor
+    rather than rewarding the absence of evidence. The distribution gate is the
+    one documented exception, and says why at its own definition.
+    """
+    if n <= 0 or not rows:
+        return None                 # rows[-0:] is the WHOLE list, not an empty
+                                    # window -- the same trap ud_ratio guards
+    up = down = 0.0
+    for r in rows[-n:]:
+        span = r["h"] - r["l"]
+        if span <= 0:
+            continue                # limit bar / stale print: no intrabar signal
+        m = ((r["c"] - r["l"]) - (r["h"] - r["c"])) / span
+        if m > 0:
+            up += r["v"] * m
+        else:
+            down += r["v"] * -m
+    if down <= 0:
+        return None
+    return up / down
+
+
+# ----------------------------------------------- reading the ratios in English
+#
+# Two labels, both TOTAL functions: every input, including a None ratio, gets a
+# defined string back. They feed a display column, and a None in a display
+# column is a bug someone else has to discover -- an explicit "unknown" says the
+# same thing out loud.
+
+VOLUME_SIGNAL_UD = 1.25       # same floor LEADER and TURN gate on, loosened
+VOLUME_SIGNAL_WEIGHTED = 1.0  # a ratio of two volume buckets: 1.0 is parity
+
+ACCUMULATION = "accumulation"
+DISTRIBUTION_INTO_STRENGTH = "distribution-into-strength"
+SUPPORTED = "supported"
+DISTRIBUTION = "distribution"
+SIGNAL_UNKNOWN = "unknown"
+
+VOLUME_SIGNALS = frozenset({ACCUMULATION, DISTRIBUTION_INTO_STRENGTH,
+                            SUPPORTED, DISTRIBUTION, SIGNAL_UNKNOWN})
+
+
+def volume_signal(ud, weighted):
+    """The two ratios read together, in four words.
+
+    Neither ratio alone answers the question. The close-to-close ratio says
+    which days closed up; the close-weighted one says who owned the closes. The
+    interesting cases are the two where they DISAGREE:
+
+      ud >= 1.25, weighted >= 1.0   ``accumulation``
+          Genuine accumulation -- price rising and closing strong.
+      ud >= 1.25, weighted <  1.0   ``distribution-into-strength``
+          Price drifts up, but sellers control the close -- institutional supply
+          being distributed into strength.
+      ud <  1.25, weighted >= 1.0   ``supported``
+          Price soft, but buyers defend every dip -- often a base forming.
+      ud <  1.25, weighted <  1.0   ``distribution``
+          Distribution, unambiguously.
+
+    Either ratio being None makes the READING unknown, not one of the four: the
+    four labels are statements about a disagreement, and a measurement that does
+    not exist cannot agree or disagree with anything.
+    """
+    if ud is None or weighted is None:
+        return SIGNAL_UNKNOWN
+    if ud >= VOLUME_SIGNAL_UD:
+        return (ACCUMULATION if weighted >= VOLUME_SIGNAL_WEIGHTED
+                else DISTRIBUTION_INTO_STRENGTH)
+    return (SUPPORTED if weighted >= VOLUME_SIGNAL_WEIGHTED
+            else DISTRIBUTION)
+
+
+# Where the 20-bar ratio sits against the 50-bar one, as a fraction. Below 0.70
+# the recent month is materially weaker than the quarter; 0.70-0.90 is a drift;
+# 0.90-1.30 is noise on two overlapping windows of the same tape (the 20 bars
+# ARE 20 of the 50, so the two can never be independent and a band this wide is
+# what "unchanged" honestly looks like); above it the near window is carrying
+# the number.
+TREND_FADE = 0.70
+TREND_FLAT = 0.90
+TREND_STEADY_HI = 1.30
+# Below this the near window is not merely weaker, it has crossed into net
+# distribution -- which is a different statement from "less accumulation".
+TREND_REVERSAL_UD = 1.0
+
+TREND_REVERSED = "reversed"
+TREND_FADING = "fading"
+TREND_FLATTENING = "flattening"
+TREND_STEADY = "steady"
+TREND_STRENGTHENING = "strengthening"
+TREND_UNKNOWN = "unknown"
+
+ACCUMULATION_TRENDS = frozenset({TREND_REVERSED, TREND_FADING, TREND_FLATTENING,
+                                 TREND_STEADY, TREND_STRENGTHENING,
+                                 TREND_UNKNOWN})
+
+
+def accumulation_trend(ud_50, ud_20):
+    """Is the accumulation the 50-bar ratio reports still happening?
+
+    Order matters and is not an implementation detail: ``reversed`` is tested
+    FIRST because it is a strictly stronger statement than ``fading``. Both say
+    the near window is under 70% of the far one; ``reversed`` adds that the near
+    window has crossed below 1.0, so the name is not merely being accumulated
+    less, it is being distributed. VIJAYA reads 1.70 over 50 bars and 0.52 over
+    20 -- a 50-bar screen calls that accumulation and it has not been true for a
+    month.
+
+    Total, like volume_signal: either ratio None, or a 50-bar ratio of exactly
+    zero that no fraction can be taken against, returns ``unknown``.
+    """
+    if ud_50 is None or ud_20 is None or ud_50 == 0:
+        return TREND_UNKNOWN
+    frac = ud_20 / ud_50
+    if ud_20 < TREND_REVERSAL_UD and frac < TREND_FADE:
+        return TREND_REVERSED
+    if frac < TREND_FADE:
+        return TREND_FADING
+    if frac < TREND_FLAT:
+        return TREND_FLATTENING
+    if frac <= TREND_STEADY_HI:
+        return TREND_STEADY
+    return TREND_STRENGTHENING
 
 
 def turnover_cr(rows, n=50):
@@ -280,21 +446,79 @@ ACCUMULATION_CUTS = [(2.50, 10.0), (2.00, 9.0), (1.50, 8.0),
 NO_ACCUMULATION = 2.0
 
 
-def fit_accumulation(ud):
-    """0-10 for O'Neil's up/down volume ratio. The ranking half of section 3.
+def _accumulation_rung(x):
+    """The 0-10 ladder, applied to ONE ratio.
 
-    None -- no down-volume in the window, so the ratio is unmeasurable -- scores
-    the floor, NOT a neutral middle and NOT the top. It is the same decision the
+    None -- nothing to divide by, so the ratio is unmeasurable -- scores the
+    floor, NOT a neutral middle and NOT the top. It is the same decision the
     gates make in _ud_ratio_ok, for the same reason: a score that rewards the
     ABSENCE of evidence would put an unmeasurable name above a measured one, and
     on this metric unmeasurable means a series too short or too flat to judge.
-    Note that this arm is reachable only through COILED, BREAKOUT and PULLBACK,
-    whose gates do not require the ratio; LEADER and TURN reject a None long
-    before their fit is computed.
     """
-    if ud is None or ud < ACCUMULATION_CUTS[-1][0]:
+    if x is None or x < ACCUMULATION_CUTS[-1][0]:
         return NO_ACCUMULATION
-    return band(ud, ACCUMULATION_CUTS)
+    return band(x, ACCUMULATION_CUTS)
+
+
+# How the two ratios share the accumulation term. FIFTY-FIFTY: they are two
+# measurements of one question -- is this name being bought -- and neither is
+# the senior one. The close-to-close ratio is the conventional number and the
+# one a reader recognises; the close-weighted ratio is the one that catches
+# supply being distributed into strength. A name has to satisfy both to score
+# the top of this term, which is the whole point.
+#
+# They sum to 1.0, so an aligned name scores exactly what it scored before this
+# term learned about the close: ud 1.60 and weighted 1.60 is still an 8.
+ACC_WEIGHT_UD = 0.5
+ACC_WEIGHT_WEIGHTED = 0.5
+
+# What a fading or reversed accumulation trend costs, in ladder points. Nothing
+# is charged for `flattening`, `steady` or `strengthening`, and nothing for
+# `unknown`: an unmeasurable trend is already paying through whichever ratio
+# could not be measured, and charging it twice would price a data gap as a
+# market finding.
+#
+# `reversed` costs double `fading` because it is the strictly stronger
+# statement: both say the near window has collapsed against the far one, and
+# `reversed` adds that it has crossed into net distribution.
+TREND_PENALTY = {TREND_REVERSED: 2.0, TREND_FADING: 1.0}
+
+
+def fit_accumulation(ud, weighted, ud_20):
+    """0-10 for whether this name is under accumulation. The ranking half of
+    section 3, and the one place the three volume numbers are priced together.
+
+    ONE sub-score for all five setups, so "accumulation" means the same thing in
+    every table, and it now asks three questions rather than one:
+
+      * the conventional up/down ratio -- which days closed up
+      * the close-weighted ratio -- who owned those closes
+      * the 20-bar ratio against the 50-bar one -- whether it is still happening
+
+    The third enters as a PENALTY rather than as a third ladder, deliberately.
+    It is not an independent measurement: the 20 bars ARE 20 of the 50, so
+    scoring it as a peer would count the same tape twice and hand a name credit
+    for its own recent history under two headings. What it can say that the
+    levels cannot is that the level is stale -- CONCORDBIO reads 3.74 over 50
+    bars and 1.18 over 20 -- and a deduction is the honest shape for that.
+
+    All three arguments are REQUIRED. A default would let a call site that
+    forgot the close-weighted ratio score every name as if it were unmeasurable
+    -- a silent halving of the term across a whole scan, visible nowhere.
+
+    The trend is derived HERE, from the same accumulation_trend the report
+    prints, so the penalty a row is charged and the label a reader sees can
+    never disagree.
+    """
+    score = (ACC_WEIGHT_UD * _accumulation_rung(ud)
+             + ACC_WEIGHT_WEIGHTED * _accumulation_rung(weighted))
+    score -= TREND_PENALTY.get(accumulation_trend(ud, ud_20), 0.0)
+    # DEFENSIVE, not load-bearing, and no test can kill either bound today: the
+    # ladder's own floor is NO_ACCUMULATION (2.0) and the largest penalty is
+    # 2.0, so the arithmetic cannot leave [0, 10] as the constants stand. They
+    # are written anyway because the constants above are meant to be tuned, and
+    # a Fit component outside 0-10 would silently break every setup's weighting.
+    return max(0.0, min(10.0, score))
 
 
 # Every Fit weight, as DATA rather than as literals inside five expressions, so
@@ -362,6 +586,51 @@ def _ud_ratio_ok(ctx, name, strict):
     """
     r = ctx.get("ud_ratio")
     return r is not None and r >= T(name, "ud_ratio", strict)
+
+
+# The floor both new measures have to be UNDER, together, before a name is
+# excluded from every setup. (loosened, strict), like every threshold in this
+# file, so strict can tighten it later; the two are equal today because the
+# gate's whole claim is the unambiguous case and 1.0 is the point at which each
+# ratio changes sign. Strict must never be BELOW loosened -- a lower floor
+# excludes fewer names, which would let strict match something loosened does
+# not and break the subset invariant that holds everywhere else.
+#
+# Kept OUTSIDE the per-setup THRESHOLDS table because it is not a per-setup
+# judgement: it is one statement about the symbol, applied identically to all
+# five, and five copies of the same pair would be five places to disagree.
+DISTRIBUTION_FLOOR = (1.0, 1.0)
+
+
+def _not_distributing(ctx, strict):
+    """False only when BOTH new measures say the name is being distributed NOW.
+
+    Two independent readings have to agree before this rejects anything. The
+    close-weighted ratio says sellers own the closes; the 20-bar ratio says the
+    recent month is net down-volume. Either one alone is a finding worth
+    printing and NOT a reason to drop the name -- a `distribution-into-strength`
+    name still matches, still ranks, and carries its label into the table.
+
+    A None on either measure is NOT read as distribution, and that is a
+    deliberate departure from _ud_ratio_ok, which fails a None outright. The two
+    gates ask opposite questions. _ud_ratio_ok demands positive evidence of
+    accumulation, so the absence of evidence closes it. This one demands
+    positive evidence of DISTRIBUTION -- "two independent measures both saying
+    the stock is distributing now" -- and a measurement that does not exist is
+    not one of them saying anything. Reading None as distribution would also be
+    factually backwards: ud_weighted returns None exactly when NO bar closed
+    below its own midpoint, which is the most bullish tape there is.
+    """
+    floor = DISTRIBUTION_FLOOR[1 if strict else 0]
+    weighted, short = ctx.get("ud_weighted"), ctx.get("ud_20")
+    return not (weighted is not None and weighted < floor
+                and short is not None and short < floor)
+
+
+def _distributing_label(strict):
+    """The condition a PASSING name satisfies, for the rejection funnel."""
+    return ("at least one of the close-weighted and 20-day volume ratios at "
+            "%.2f or better" % DISTRIBUTION_FLOOR[1 if strict else 0])
 
 
 # Sessions COILED counts prior up-thrusts over. 126 is ~6 months, the same
@@ -499,9 +768,19 @@ def match_coiled(o, ctx, strict=False, diag=None):
     # widths[0]` true for any non-negative width, so a zero first window is
     # rejected at the net-contraction gate and never reaches this line. Kept as
     # a division guard in case that gate is ever reordered.
+
+    # Both new volume measures below 1.0 at once: the closes are being sold AND
+    # the last month is net down-volume. Neither reading alone rejects -- a name
+    # drifting up while sellers own the close is a real finding the table prints
+    # with its label -- but two independent measures agreeing that the name is
+    # being distributed RIGHT NOW is not a setup, whatever the price is doing.
+    if not _not_distributing(ctx, strict):
+        return _reject(diag, 13, _distributing_label(strict))
+
     return {"contraction": widths[-1] / widths[0] if widths[0] else 1.0,
             "pos_in_base": pos, "dryup": dryup, "widths": widths,
-            "ud_ratio": ctx.get("ud_ratio")}
+            "ud_ratio": ctx.get("ud_ratio"),
+            "ud_weighted": ctx.get("ud_weighted"), "ud_20": ctx.get("ud_20")}
 
 
 def fit_coiled(ev):
@@ -517,8 +796,10 @@ def fit_coiled(ev):
     c = band_desc(ev["contraction"], [(0.50, 10), (0.65, 8), (0.80, 6), (1.00, 4)])
     p = band(ev["pos_in_base"], [(0.85, 10), (0.70, 8), (0.50, 6)])
     d = band_desc(ev["dryup"], [(0.70, 10), (0.85, 8), (1.00, 6)])
+    acc = fit_accumulation(ev.get("ud_ratio"), ev.get("ud_weighted"),
+                           ev.get("ud_20"))
     return round(w["contraction"] * c + w["pos_in_base"] * p + w["dryup"] * d
-                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
+                 + w["accumulation"] * acc, 2)
 
 
 # ------------------------------------------------------------------ BREAKOUT
@@ -639,12 +920,22 @@ def match_breakout(o, ctx, strict=False, diag=None):
     # broke out of a tight base". Measured before the breakout bar, the number
     # describes the base the name actually broke out of, and today's move
     # cannot change it.
+
+    # Both new volume measures below 1.0 at once: the closes are being sold AND
+    # the last month is net down-volume. Neither reading alone rejects -- a name
+    # drifting up while sellers own the close is a real finding the table prints
+    # with its label -- but two independent measures agreeing that the name is
+    # being distributed RIGHT NOW is not a setup, whatever the price is doing.
+    if not _not_distributing(ctx, strict):
+        return _reject(diag, 9, _distributing_label(strict))
+
     span = base_hi - base_lo
     return {"vol_mult": vol_mult, "pct_above_base": above,
             "base_bars": rng["bars"],
             "tightness": span / base_hi * 100 if base_hi else 0.0,
             "volume_light": vol_mult < CONFIRMED_VOL_MULT,
-            "ud_ratio": ctx.get("ud_ratio")}
+            "ud_ratio": ctx.get("ud_ratio"),
+            "ud_weighted": ctx.get("ud_weighted"), "ud_20": ctx.get("ud_20")}
 
 
 def fit_breakout(ev):
@@ -662,8 +953,10 @@ def fit_breakout(ev):
     b = band(ev["base_bars"], [(30, 10), (20, 8), (15, 6), (12, 4)])
     if ev["tightness"] > 8.0:
         b *= 0.8
+    acc = fit_accumulation(ev.get("ud_ratio"), ev.get("ud_weighted"),
+                           ev.get("ud_20"))
     return round(w["vol_mult"] * v + w["freshness"] * f + w["base_quality"] * b
-                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
+                 + w["accumulation"] * acc, 2)
 
 
 # -------------------------------------------------------------------- LEADER
@@ -748,9 +1041,19 @@ def match_leader(o, ctx, strict=False, diag=None):
                                  "down-closes over %d sessions"
                        % (T("LEADER", "ud_ratio", strict), UD_BARS))
 
+
+    # Both new volume measures below 1.0 at once: the closes are being sold AND
+    # the last month is net down-volume. Neither reading alone rejects -- a name
+    # drifting up while sellers own the close is a real finding the table prints
+    # with its label -- but two independent measures agreeing that the name is
+    # being distributed RIGHT NOW is not a setup, whatever the price is doing.
+    if not _not_distributing(ctx, strict):
+        return _reject(diag, 12, _distributing_label(strict))
+
     return {"pct_from_high": from_high, "rs_1m": rs["1m"], "rs_3m": rs["3m"],
             "full_stack": bool(px > ma["sma20"] > ma["sma50"] > ma["sma200"]),
-            "ud_ratio": ctx.get("ud_ratio")}
+            "ud_ratio": ctx.get("ud_ratio"),
+            "ud_weighted": ctx.get("ud_weighted"), "ud_20": ctx.get("ud_20")}
 
 
 def fit_leader(ev):
@@ -766,8 +1069,10 @@ def fit_leader(ev):
     r = band(ev["rs_3m"], [(20.0, 10), (10.0, 8), (5.0, 6), (0.0, 4)])
     p = band_desc(ev["pct_from_high"], [(2.0, 10), (5.0, 8), (10.0, 6)])
     s = 10.0 if ev["full_stack"] else 7.0
+    acc = fit_accumulation(ev.get("ud_ratio"), ev.get("ud_weighted"),
+                           ev.get("ud_20"))
     return round(w["rs_3m"] * r + w["proximity"] * p + w["stack"] * s
-                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
+                 + w["accumulation"] * acc, 2)
 
 
 # ------------------------------------------------------------------ PULLBACK
@@ -1078,6 +1383,15 @@ def match_pullback(o, ctx, strict=False, diag=None):
                                  "of the advance it retraces"
                        % T("PULLBACK", "pullback_vol_ratio", strict))
 
+
+    # Both new volume measures below 1.0 at once: the closes are being sold AND
+    # the last month is net down-volume. Neither reading alone rejects -- a name
+    # drifting up while sellers own the close is a real finding the table prints
+    # with its label -- but two independent measures agreeing that the name is
+    # being distributed RIGHT NOW is not a setup, whatever the price is doing.
+    if not _not_distributing(ctx, strict):
+        return _reject(diag, 13, _distributing_label(strict))
+
     # TWO retracement numbers, deliberately, because they answer two questions
     # and neither substitutes for the other:
     #
@@ -1099,6 +1413,7 @@ def match_pullback(o, ctx, strict=False, diag=None):
             "close_position": close_pos, "retrace_pct": retrace,
             "pullback_vol_ratio": pull_vol,
             "ud_ratio": ctx.get("ud_ratio"),
+            "ud_weighted": ctx.get("ud_weighted"), "ud_20": ctx.get("ud_20"),
             "retrace_of_52w_range_pct": (o["hi52"] - px) / span * 100
                                         if span else 0.0}
 
@@ -1169,9 +1484,11 @@ def fit_pullback(ev):
     d = band_desc(ev["dist_to_ma_pct"], [(1.0, 10), (2.0, 8), (3.0, 6)])
     r = band_desc(abs(ev["rsi"] - 50.0), [(5.0, 10), (10.0, 8), (99.0, 5)])
     v = band_desc(ev["pullback_vol_ratio"], PULLBACK_VOL_CUTS)
+    acc = fit_accumulation(ev.get("ud_ratio"), ev.get("ud_weighted"),
+                           ev.get("ud_20"))
     return round(w["dist_to_ma"] * d + w["rsi"] * r + w["pullback_vol"] * v
                  + w["retrace_depth"] * retrace_depth(ev["retrace_of_52w_range_pct"])
-                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
+                 + w["accumulation"] * acc, 2)
 
 
 # ---------------------------------------------------------------------- TURN
@@ -1224,10 +1541,20 @@ def match_turn(o, ctx, strict=False, diag=None):
                                 "down-closes over %d sessions"
                        % (T("TURN", "ud_ratio", strict), UD_BARS))
 
+
+    # Both new volume measures below 1.0 at once: the closes are being sold AND
+    # the last month is net down-volume. Neither reading alone rejects -- a name
+    # drifting up while sellers own the close is a real finding the table prints
+    # with its label -- but two independent measures agreeing that the name is
+    # being distributed RIGHT NOW is not a setup, whatever the price is doing.
+    if not _not_distributing(ctx, strict):
+        return _reject(diag, 9, _distributing_label(strict))
+
     return {"bars_since_cross": bars, "macd_hist": hist,
             "sma200_rising": bool(ctx["sma200_rising"]),
             "vol_expansion": ctx.get("vol_expansion") or 1.0,
-            "ud_ratio": ctx.get("ud_ratio")}
+            "ud_ratio": ctx.get("ud_ratio"),
+            "ud_weighted": ctx.get("ud_weighted"), "ud_20": ctx.get("ud_20")}
 
 
 def fit_turn(ev):
@@ -1247,9 +1574,11 @@ def fit_turn(ev):
     s = 10.0 if ev["sma200_rising"] else 4.0
     v = band(ev["vol_expansion"], [(1.30, 10), (1.10, 8), (0.0, 5)])
     m = 10.0 if ev["macd_hist"] > 0 else 6.0
+    acc = fit_accumulation(ev.get("ud_ratio"), ev.get("ud_weighted"),
+                           ev.get("ud_20"))
     return round(w["cross_recency"] * c + w["sma200_slope"] * s
                  + w["vol_expansion"] * v + w["macd"] * m
-                 + w["accumulation"] * fit_accumulation(ev.get("ud_ratio")), 2)
+                 + w["accumulation"] * acc, 2)
 
 
 # ------------------------------------------------------------ context builder
@@ -1317,7 +1646,15 @@ def _ctx_from_rows(rows, rs):
             # this dict: LEADER and TURN both gate on it and the report prints it
             # for every setup, so recomputing it per predicate would walk the
             # same 50 bars three times for each of 500 names.
-            "ud_ratio": ud_ratio(rows, UD_BARS)}
+            "ud_ratio": ud_ratio(rows, UD_BARS),
+            # The same window measured a second way, and the same measurement
+            # over a nearer window. Three numbers rather than one because they
+            # disagree in ways that matter -- see ud_weighted and
+            # accumulation_trend -- and all three are computed HERE so the five
+            # predicates, the two labels and the Fit term cannot drift apart on
+            # which bars any of them describes.
+            "ud_weighted": ud_weighted(rows, UD_BARS),
+            "ud_20": ud_ratio(rows, UD_SHORT_BARS)}
 
 
 def build_ctx(o, rs):
@@ -1351,6 +1688,27 @@ REGISTRY = {"COILED": (match_coiled, fit_coiled),
 IMPOSSIBLE_PAIRS = frozenset({frozenset({"BREAKOUT", "PULLBACK"})})
 
 
+# The volume block every matched entry carries at its TOP LEVEL, CONFLUENCE
+# included. Named once, as data, because five producers and several consumers
+# have to agree on it exactly: a renderer walking matched[setup][key] cannot
+# special-case one entry, and a key that appeared on four setups out of six
+# would fail in whichever table nobody opened today.
+#
+# All five are properties of the SYMBOL and none of any one match, which is why
+# they are lifted from ctx rather than out of a predicate's evidence payload --
+# see the note in evaluate().
+VOLUME_KEYS = ("ud_ratio", "ud_weighted", "ud_20",
+               "volume_signal", "accumulation_trend")
+
+
+def _volume_block(ctx):
+    """The five volume keys for one symbol, derived once from its context."""
+    ud, weighted, short = ctx["ud_ratio"], ctx["ud_weighted"], ctx["ud_20"]
+    return {"ud_ratio": ud, "ud_weighted": weighted, "ud_20": short,
+            "volume_signal": volume_signal(ud, weighted),
+            "accumulation_trend": accumulation_trend(ud, short)}
+
+
 def _add_confluence(matched):
     names = [n for n in SETUPS if n in matched]      # life-cycle order, not alphabetical
     for i, a in enumerate(names):
@@ -1360,23 +1718,28 @@ def _add_confluence(matched):
     if len(names) < 2:
         return matched
     fits = [matched[n]["fit"] for n in names]
-    matched["CONFLUENCE"] = {
+    # Every volume key is a property of the SYMBOL, not of any one setup, so
+    # every constituent carries identical values and taking the first is not a
+    # choice between disagreeing numbers. They are copied up rather than
+    # recomputed so the CONFLUENCE row prints the same figures as the rows it is
+    # made of -- a column that disagreed with its own inputs would be worse than
+    # no column, and recomputing a LABEL would additionally risk CONFLUENCE
+    # reading "accumulation" under constituents reading "distribution".
+    #
+    # Carried at the TOP LEVEL, because CONFLUENCE must satisfy the same read as
+    # every other entry: a renderer walking matched[setup][key] cannot
+    # special-case one key. `.get` rather than `[...]`: _add_confluence is
+    # called with hand-built dicts in tests and by anything composing matches
+    # itself, and a missing key must arrive as the None a renderer already knows
+    # how to print, not as a KeyError halfway through a 500-name scan.
+    conf = {k: matched[names[0]].get(k) for k in VOLUME_KEYS}
+    conf.update({
         "fit": round(sum(fits) / len(fits), 2),
-        # ud_ratio is a property of the SYMBOL, not of any one setup, so every
-        # constituent carries the identical number and taking the first is not
-        # a choice between disagreeing values. It is copied up rather than
-        # recomputed so the CONFLUENCE row prints the same figure as the rows it
-        # is made of -- a column that disagreed with its own inputs would be
-        # worse than no column.
-        #
-        # Carried at the TOP LEVEL as well as inside evidence, because
-        # CONFLUENCE must satisfy the same read as every other entry: a renderer
-        # walking matched[setup]["ud_ratio"] cannot special-case one key.
-        "ud_ratio": matched[names[0]]["ud_ratio"],
         "evidence": {"matched": names, "count": len(names),
                      "label": "+".join(names),
                      "ud_ratio": matched[names[0]]["evidence"].get("ud_ratio"),
-                     "mean_fit": round(sum(fits) / len(fits), 2)}}
+                     "mean_fit": round(sum(fits) / len(fits), 2)}})
+    matched["CONFLUENCE"] = conf
     return matched
 
 
@@ -1390,11 +1753,15 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
       * ``{}``            -- the symbol is liquid and was screened against every
                              predicate, and matched none of them. This is the
                              overwhelmingly common outcome and is a real finding.
-      * non-empty ``dict`` -- ``{setup: {"fit", "evidence", "ud_ratio"}}`` per
+      * non-empty ``dict`` -- ``{setup: {"fit", "evidence", *VOLUME_KEYS}}`` per
                              match, plus ``CONFLUENCE`` when two or more setups
-                             agree. ``ud_ratio`` is present on EVERY entry
-                             including ``CONFLUENCE``, and may be None when the
-                             symbol had no down-volume to divide by.
+                             agree.
+
+    The volume block -- ``ud_ratio``, ``ud_weighted``, ``ud_20``,
+    ``volume_signal``, ``accumulation_trend`` -- is present on EVERY entry
+    including ``CONFLUENCE``. The three ratios may be None when the symbol had
+    nothing to divide by; the two labels are ALWAYS strings, "unknown" being the
+    reading of a ratio that could not be measured.
 
     Callers must test ``is None``, never truthiness: both non-match states are
     falsy, and collapsing them makes the scan header report several hundred
@@ -1421,13 +1788,15 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
         ev = match_fn(o, ctx, strict,
                       None if diag is None else diag.setdefault(name, {}))
         if ev is not None:
-            # ud_ratio rides at the TOP LEVEL, beside fit and evidence, not only
-            # inside evidence. It is a property of the SYMBOL rather than of any
-            # one match, so a caller that wants to print it for every setup --
-            # including CONFLUENCE, whose evidence slots are already spoken for
-            # -- must be able to read one key off any entry without knowing
-            # which predicate produced it. Taken from ctx, the single place it
-            # is computed, so the five predicates cannot drift apart on it.
-            matched[name] = {"fit": fit_fn(ev), "evidence": ev,
-                             "ud_ratio": ctx["ud_ratio"]}
+            # The volume block rides at the TOP LEVEL, beside fit and evidence,
+            # not only inside evidence. Every one of its keys is a property of
+            # the SYMBOL rather than of any one match, so a caller that wants to
+            # print them for every setup -- including CONFLUENCE, whose evidence
+            # slots are already spoken for -- must be able to read them off any
+            # entry without knowing which predicate produced it. Taken from ctx,
+            # the single place they are computed, so the five predicates cannot
+            # drift apart on them.
+            entry = _volume_block(ctx)
+            entry.update({"fit": fit_fn(ev), "evidence": ev})
+            matched[name] = entry
     return _add_confluence(matched)

@@ -5,7 +5,7 @@ sys.path.insert(0, _root)
 sys.path.insert(0, _here)
 import setups
 from engine import A
-from fixtures import bar, trend_series
+from fixtures import bar, cmf_series, flat_series, trend_series, ud_series
 
 
 def vshape(down_n, up_n, top=300.0, down_step=1.0, up_step=2.0, vol=1_000_000,
@@ -624,9 +624,10 @@ class TestEvaluate(unittest.TestCase):
     def test_each_entry_carries_a_fit_and_the_predicate_evidence(self):
         out = setups.evaluate(self.rig.scored(), self.rs)
         for name in ("BREAKOUT", "LEADER", "TURN"):
-            # ud_ratio is part of the entry shape, not an extra: the renderer
-            # reads it off every match without consulting evidence.
-            self.assertEqual(set(out[name]), {"fit", "evidence", "ud_ratio"})
+            # The volume block is part of the entry shape, not an extra: the
+            # renderer reads it off every match without consulting evidence.
+            self.assertEqual(set(out[name]),
+                             {"fit", "evidence"} | set(setups.VOLUME_KEYS))
             self.assertTrue(0.0 <= out[name]["fit"] <= 10.0)
             self.assertTrue(out[name]["evidence"])
         self.assertIn("vol_mult", out["BREAKOUT"]["evidence"])
@@ -704,12 +705,15 @@ class TestEvaluate(unittest.TestCase):
                      TURN=(stub_match(None), lambda ev: 0.0))
         out = setups.evaluate(self.rig.scored(), self.rs)
         self.assertEqual(list(out), ["COILED"])
-        # ud_ratio still rides along even though this stub's evidence is empty:
-        # it is read from ctx, so it does not depend on the predicate's payload.
-        self.assertEqual(
-            out["COILED"],
-            {"fit": 4.0, "evidence": {},
-             "ud_ratio": setups.ud_ratio(self.rig.rows, setups.UD_BARS)})
+        # The volume block still rides along even though this stub's evidence
+        # is empty: it is read from ctx, so it does not depend on the
+        # predicate's payload.
+        expected = setups._volume_block(
+            setups._ctx_from_rows(self.rig.rows, self.rs))
+        expected.update({"fit": 4.0, "evidence": {}})
+        self.assertEqual(out["COILED"], expected)
+        self.assertEqual(out["COILED"]["ud_ratio"],
+                         setups.ud_ratio(self.rig.rows, setups.UD_BARS))
 
     def test_setups_not_the_registry_decides_what_the_screen_reports(self):
         """evaluate() walks SETUPS. A registry entry with no place in the
@@ -1146,6 +1150,701 @@ class TestUdRatioRidesOnEveryMatchedEntry(unittest.TestCase):
         out = setups._add_confluence(matched)
         self.assertEqual(out["CONFLUENCE"]["ud_ratio"], 2.5)
         self.assertEqual(out["CONFLUENCE"]["evidence"]["ud_ratio"], 2.5)
+
+
+class TestUdWeighted(unittest.TestCase):
+    """The close-weighted ratio: volume x Chaikin multiplier, up over down.
+
+    Every fixture here is built by cmf_series, whose whole reason to exist is
+    that the close position VARIES bar to bar -- see its docstring for the three
+    ways the older fixtures cannot tell a correct implementation from a wrong
+    one.
+    """
+
+    VOLS = (1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000)
+
+    def test_multiplier_weights_each_bars_volume_by_its_close_position(self):
+        # positions 1.0 / 0.75 / 0.5 / 0.25 / 0.0 -> m = +1, +0.5, 0, -0.5, -1
+        #   up   = 1e6*1.0 + 2e6*0.5           = 2e6
+        #   down = 4e6*0.5 + 5e6*1.0           = 7e6
+        rows = cmf_series([1.0, 0.75, 0.5, 0.25, 0.0], vols=self.VOLS)
+        self.assertAlmostEqual(setups.ud_weighted(rows, 50), 2 / 7, places=9)
+
+    def test_the_fixture_can_tell_up_over_down_from_down_over_up(self):
+        """The guard on this whole class.
+
+        A sign-flipped multiplier and a swapped numerator/denominator both
+        return the RECIPROCAL of the right answer, so a fixture landing on 1.0 --
+        which every equal-close-position series does -- proves nothing at all.
+        """
+        rows = cmf_series([1.0, 0.75, 0.5, 0.25, 0.0], vols=self.VOLS)
+        r = setups.ud_weighted(rows, 50)
+        self.assertNotAlmostEqual(r, 1 / r, places=6)
+
+    def test_a_midpoint_close_counts_toward_neither_bucket(self):
+        """m == 0 is not a down bar. `else: down += v` is the natural typo and
+        it would let a fortnight of doji decide the ratio."""
+        vols = (1_000_000, 2_000_000, 3_000_000)
+        quiet = cmf_series([1.0, 0.0, 0.5], vols=vols)
+        loud = cmf_series([1.0, 0.0, 0.5], vols=(1_000_000, 2_000_000, 90_000_000))
+        self.assertAlmostEqual(setups.ud_weighted(quiet, 50), 0.5, places=9)
+        self.assertAlmostEqual(setups.ud_weighted(loud, 50), 0.5, places=9)
+
+    def test_a_bar_is_weighted_by_how_far_off_the_midpoint_it_closed(self):
+        """Not a bar count and not a raw volume sum: a close 60% of the way up
+        its range is worth a fifth of one at the high, on the same volume."""
+        equal_vol = (1_000_000, 1_000_000, 1_000_000)
+        rows = cmf_series([1.0, 0.6, 0.0], vols=equal_vol)
+        #   up = 1e6*1.0 + 1e6*0.2 = 1.2e6 ; down = 1e6*1.0
+        self.assertAlmostEqual(setups.ud_weighted(rows, 50), 1.2, places=9)
+        # `up += v` (unweighted) would read 2.0 here.
+        self.assertNotAlmostEqual(setups.ud_weighted(rows, 50), 2.0, places=6)
+
+    def test_zero_range_bars_are_skipped_not_counted_as_neutral(self):
+        plain = cmf_series([1.0, 0.0], vols=(1_000_000, 2_000_000))
+        with_limit_bar = cmf_series(
+            [1.0, 0.0, 1.0], vols=(1_000_000, 2_000_000, 50_000_000),
+            spans=(2.0, 2.0, 0.0))
+        self.assertEqual(with_limit_bar[2]["h"], with_limit_bar[2]["l"],
+                         "the fixture stopped building a real zero-range bar")
+        self.assertAlmostEqual(setups.ud_weighted(plain, 50), 0.5, places=9)
+        self.assertAlmostEqual(setups.ud_weighted(with_limit_bar, 50), 0.5,
+                               places=9)
+
+    def test_an_all_zero_range_series_is_unmeasurable_rather_than_a_crash(self):
+        self.assertIsNone(setups.ud_weighted(flat_series(60, spread=0.0), 50))
+
+    def test_none_when_no_bar_closed_below_its_own_midpoint(self):
+        """The denominator is empty, so there is no ratio -- the same decision
+        ud_ratio makes when nothing closed down."""
+        self.assertIsNone(setups.ud_weighted(
+            cmf_series([1.0, 0.75, 0.5, 0.6], vols=self.VOLS), 50))
+
+    def test_zero_up_volume_is_a_measured_zero_and_not_none(self):
+        """0.0 and None are different findings and must stay so: one says every
+        close was sold, the other says the series could not be judged."""
+        rows = cmf_series([0.0, 0.25, 0.5], vols=self.VOLS)
+        self.assertEqual(setups.ud_weighted(rows, 50), 0.0)
+        self.assertIsNotNone(setups.ud_weighted(rows, 50))
+
+    def test_a_non_positive_window_is_none_and_not_the_whole_series(self):
+        """`rows[-0:]` is the WHOLE list. The same trap ud_ratio guards, and a
+        fixture whose full-series answer is a real number is what makes an
+        unguarded implementation visible."""
+        rows = cmf_series([1.0, 0.75, 0.5, 0.25, 0.0], vols=self.VOLS)
+        self.assertIsNotNone(setups.ud_weighted(rows, 5))
+        self.assertIsNone(setups.ud_weighted(rows, 0))
+        self.assertIsNone(setups.ud_weighted(rows, -3))
+
+    def test_an_empty_series_is_none(self):
+        self.assertIsNone(setups.ud_weighted([], 50))
+
+    def test_only_the_last_n_bars_are_measured(self):
+        rows = (cmf_series([0.0, 0.0, 0.0], vols=(9_000_000,) * 3)
+                + cmf_series([1.0, 0.0], vols=(1_000_000, 2_000_000)))
+        self.assertAlmostEqual(setups.ud_weighted(rows, 2), 0.5, places=9)
+        self.assertLess(setups.ud_weighted(rows, 50), 0.5)
+
+    def test_the_default_window_is_the_shared_fifty_bar_one(self):
+        """A repeating pattern reads the same over 20 bars as over 50 and could
+        not tell the default apart from UD_SHORT_BARS. The heavy selling here
+        sits in the far 30 bars only."""
+        rows = (cmf_series([0.1] * 30, vols=(1_000_000,))
+                + cmf_series([1.0, 0.0] * 10, vols=(1_000_000, 2_000_000)))
+        self.assertEqual(setups.ud_weighted(rows),
+                         setups.ud_weighted(rows, setups.UD_BARS))
+        self.assertAlmostEqual(setups.ud_weighted(rows, setups.UD_SHORT_BARS),
+                               0.5, places=9)
+        self.assertAlmostEqual(setups.ud_weighted(rows), 10 / 44, places=9)
+
+
+class TestUdShortWindow(unittest.TestCase):
+    def test_the_short_window_is_twenty_bars(self):
+        self.assertEqual(setups.UD_SHORT_BARS, 20)
+        self.assertLess(setups.UD_SHORT_BARS, setups.UD_BARS)
+
+
+class TestVolumeSignal(unittest.TestCase):
+    def test_the_split_points_are_the_documented_ones(self):
+        self.assertEqual(setups.VOLUME_SIGNAL_UD, 1.25)
+        self.assertEqual(setups.VOLUME_SIGNAL_WEIGHTED, 1.0)
+
+    def test_both_strong_is_accumulation(self):
+        self.assertEqual(setups.volume_signal(1.60, 1.40), setups.ACCUMULATION)
+
+    def test_rising_price_sold_into_the_close_is_distribution_into_strength(self):
+        """The case the whole measurement exists for. CONCORDBIO's live numbers."""
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_soft_price_bought_on_every_dip_is_supported(self):
+        self.assertEqual(setups.volume_signal(0.80, 1.40), setups.SUPPORTED)
+
+    def test_both_weak_is_distribution(self):
+        self.assertEqual(setups.volume_signal(0.80, 0.60), setups.DISTRIBUTION)
+
+    def test_the_ud_boundary_is_inclusive(self):
+        self.assertEqual(setups.volume_signal(1.25, 1.40), setups.ACCUMULATION)
+        self.assertEqual(setups.volume_signal(1.24, 1.40), setups.SUPPORTED)
+
+    def test_the_weighted_boundary_is_inclusive(self):
+        self.assertEqual(setups.volume_signal(1.60, 1.0), setups.ACCUMULATION)
+        self.assertEqual(setups.volume_signal(1.60, 0.99),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+        self.assertEqual(setups.volume_signal(0.80, 1.0), setups.SUPPORTED)
+        self.assertEqual(setups.volume_signal(0.80, 0.99), setups.DISTRIBUTION)
+
+    def test_an_unmeasurable_ratio_reads_unknown_from_either_side(self):
+        self.assertEqual(setups.volume_signal(None, 1.40), setups.SIGNAL_UNKNOWN)
+        self.assertEqual(setups.volume_signal(1.60, None), setups.SIGNAL_UNKNOWN)
+        self.assertEqual(setups.volume_signal(None, None), setups.SIGNAL_UNKNOWN)
+
+    def test_a_measured_zero_is_not_treated_as_missing(self):
+        """0.0 is a finding; None is the absence of one. `if not ud` collapses
+        them and would print 'unknown' for the most distributed name on the
+        list."""
+        self.assertEqual(setups.volume_signal(0.0, 0.0), setups.DISTRIBUTION)
+        self.assertEqual(setups.volume_signal(0.0, 2.0), setups.SUPPORTED)
+        self.assertEqual(setups.volume_signal(2.0, 0.0),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_every_input_including_none_gets_a_defined_label(self):
+        values = (None, 0.0, 0.5, 0.99, 1.0, 1.24, 1.25, 3.0)
+        for ud in values:
+            for w in values:
+                out = setups.volume_signal(ud, w)
+                self.assertIn(out, setups.VOLUME_SIGNALS, "%r/%r" % (ud, w))
+                self.assertIsInstance(out, str)
+
+    def test_the_four_real_labels_are_all_reachable(self):
+        seen = {setups.volume_signal(ud, w)
+                for ud in (0.5, 2.0) for w in (0.5, 2.0)}
+        self.assertEqual(seen, setups.VOLUME_SIGNALS - {setups.SIGNAL_UNKNOWN})
+
+
+class TestAccumulationTrend(unittest.TestCase):
+    def test_the_bands_are_the_documented_ones(self):
+        self.assertEqual(setups.TREND_FADE, 0.70)
+        self.assertEqual(setups.TREND_FLAT, 0.90)
+        self.assertEqual(setups.TREND_STEADY_HI, 1.30)
+        self.assertEqual(setups.TREND_REVERSAL_UD, 1.0)
+
+    def test_a_near_window_under_one_and_far_below_the_far_one_has_reversed(self):
+        """VIJAYA: 1.70 over 50 bars, 0.52 over 20."""
+        self.assertEqual(setups.accumulation_trend(1.70, 0.52),
+                         setups.TREND_REVERSED)
+
+    def test_a_collapsing_ratio_still_above_one_is_only_fading(self):
+        """CONCORDBIO 3.74/1.18 and BHARATFORG 2.05/1.06: both under 70% of
+        their own 50-bar reading, neither yet distributing."""
+        self.assertEqual(setups.accumulation_trend(3.74, 1.18),
+                         setups.TREND_FADING)
+        self.assertEqual(setups.accumulation_trend(2.05, 1.06),
+                         setups.TREND_FADING)
+
+    def test_reversed_is_tested_before_fading(self):
+        """Both conditions hold for these inputs; the stronger label must win.
+        Reordering the two branches returns 'fading' here."""
+        self.assertEqual(setups.accumulation_trend(2.0, 0.5),
+                         setups.TREND_REVERSED)
+
+    def test_both_arms_of_the_reversed_condition_are_required(self):
+        # fraction low, near window still at 1.0 exactly -> not reversed
+        self.assertEqual(setups.accumulation_trend(2.0, 1.0), setups.TREND_FADING)
+        self.assertEqual(setups.accumulation_trend(2.0, 0.999),
+                         setups.TREND_REVERSED)
+        # near window under 1.0 but holding 80% of the far one -> not reversed
+        self.assertEqual(setups.accumulation_trend(1.0, 0.8),
+                         setups.TREND_FLATTENING)
+
+    def test_the_fading_boundary(self):
+        self.assertEqual(setups.accumulation_trend(2.0, 1.39), setups.TREND_FADING)
+        self.assertEqual(setups.accumulation_trend(2.0, 1.4),
+                         setups.TREND_FLATTENING)
+
+    def test_the_flattening_boundary(self):
+        self.assertEqual(setups.accumulation_trend(2.0, 1.79),
+                         setups.TREND_FLATTENING)
+        self.assertEqual(setups.accumulation_trend(2.0, 1.8), setups.TREND_STEADY)
+
+    def test_the_steady_boundary(self):
+        self.assertEqual(setups.accumulation_trend(1.0, 1.30), setups.TREND_STEADY)
+        self.assertEqual(setups.accumulation_trend(1.0, 1.31),
+                         setups.TREND_STRENGTHENING)
+
+    def test_an_unchanged_pair_is_steady(self):
+        self.assertEqual(setups.accumulation_trend(1.47, 1.47),
+                         setups.TREND_STEADY)
+
+    def test_an_unmeasurable_ratio_reads_unknown_from_either_side(self):
+        self.assertEqual(setups.accumulation_trend(None, 1.2),
+                         setups.TREND_UNKNOWN)
+        self.assertEqual(setups.accumulation_trend(1.2, None),
+                         setups.TREND_UNKNOWN)
+        self.assertEqual(setups.accumulation_trend(None, None),
+                         setups.TREND_UNKNOWN)
+
+    def test_a_zero_far_window_is_unknown_rather_than_a_zero_division(self):
+        self.assertEqual(setups.accumulation_trend(0.0, 0.0),
+                         setups.TREND_UNKNOWN)
+        self.assertEqual(setups.accumulation_trend(0.0, 1.5),
+                         setups.TREND_UNKNOWN)
+
+    def test_a_zero_near_window_is_measured_not_discarded(self):
+        self.assertEqual(setups.accumulation_trend(2.0, 0.0),
+                         setups.TREND_REVERSED)
+
+    def test_every_input_including_none_gets_a_defined_label(self):
+        values = (None, 0.0, 0.3, 0.52, 1.0, 1.06, 1.7, 3.74)
+        for far in values:
+            for near in values:
+                out = setups.accumulation_trend(far, near)
+                self.assertIn(out, setups.ACCUMULATION_TRENDS,
+                              "%r/%r" % (far, near))
+                self.assertIsInstance(out, str)
+
+    def test_all_five_real_labels_are_reachable(self):
+        seen = {setups.accumulation_trend(2.0, near)
+                for near in (0.5, 1.2, 1.5, 1.8, 2.8)}
+        self.assertEqual(seen, setups.ACCUMULATION_TRENDS - {setups.TREND_UNKNOWN})
+
+
+class TestContextCarriesBothNewMeasurements(unittest.TestCase):
+    """Computed ONCE per symbol, beside ud_ratio, over the windows they claim."""
+
+    def setUp(self):
+        self.rows = cmf_series([1.0, 0.75, 0.5, 0.25, 0.0] * 24,
+                               vols=(1_000_000, 2_000_000, 3_000_000,
+                                     4_000_000, 5_000_000))
+
+    def test_ud_weighted_is_the_fifty_bar_close_weighted_ratio(self):
+        ctx = setups._ctx_from_rows(self.rows, {})
+        self.assertAlmostEqual(ctx["ud_weighted"],
+                               setups.ud_weighted(self.rows, setups.UD_BARS),
+                               places=12)
+        self.assertIsNotNone(ctx["ud_weighted"])
+
+    def test_ud_20_is_the_same_ud_ratio_over_a_twenty_bar_window(self):
+        ctx = setups._ctx_from_rows(self.rows, {})
+        self.assertEqual(ctx["ud_20"],
+                         setups.ud_ratio(self.rows, setups.UD_SHORT_BARS))
+
+    def test_ud_20_is_not_silently_the_fifty_bar_number(self):
+        """A monotone series reads the same over both windows and could not tell
+        a real 20-bar measurement from a copy of the 50-bar key. This one puts
+        the down closes inside the far window only: 8.0 over 50, 2.0 over 20."""
+        ctx = setups._ctx_from_rows(ud_series("u" * 40 + "d" * 10 + "u" * 10), {})
+        self.assertAlmostEqual(ctx["ud_ratio"], 8.0, places=9)
+        self.assertAlmostEqual(ctx["ud_20"], 2.0, places=9)
+
+    def test_both_survive_a_series_too_short_to_measure(self):
+        ctx = setups._ctx_from_rows(flat_series(3, spread=0.0), {})
+        self.assertIsNone(ctx["ud_weighted"])
+        self.assertIsNone(ctx["ud_20"])
+
+
+class TestVolumeBlockRidesOnEveryMatchedEntry(unittest.TestCase):
+    """The interface contract the renderer and the CSV writer both read.
+
+    Five keys, at the TOP level of every entry including CONFLUENCE. It is
+    load-bearing in the literal sense: screener.build_result_row subscripts them
+    rather than using .get, deliberately, because "unknown" is itself a real
+    label and a `.get(..., "unknown")` default would make a producer that
+    stopped emitting the key indistinguishable from a market with no history.
+    """
+
+    def setUp(self):
+        self.rig = Rig()
+        self.rig.seed()
+        self.rs = {"1m": 8.0, "3m": 14.0}
+
+    def tearDown(self):
+        self.rig.clear()
+
+    def test_the_key_list_is_the_documented_five(self):
+        self.assertEqual(setups.VOLUME_KEYS,
+                         ("ud_ratio", "ud_weighted", "ud_20",
+                          "volume_signal", "accumulation_trend"))
+
+    def test_every_entry_including_confluence_carries_all_five(self):
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        self.assertIn("CONFLUENCE", m,
+                      "the rig stopped matching two setups, so the CONFLUENCE "
+                      "arm of this contract is no longer exercised")
+        for name, hit in m.items():
+            for key in setups.VOLUME_KEYS:
+                self.assertIn(key, hit, "%s.%s" % (name, key))
+
+    def test_the_values_are_the_symbols_own_measurements(self):
+        rows = self.rig.rows
+        expected = {
+            "ud_ratio": setups.ud_ratio(rows, setups.UD_BARS),
+            "ud_weighted": setups.ud_weighted(rows, setups.UD_BARS),
+            "ud_20": setups.ud_ratio(rows, setups.UD_SHORT_BARS)}
+        # A fixture whose three ratios coincided could not tell one key from
+        # another, and one sitting at the fit value could not tell a real read
+        # from a copy.
+        self.assertEqual(len(set(expected.values())), 3, expected)
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        for name, hit in m.items():
+            for key, want in expected.items():
+                self.assertEqual(hit[key], want, "%s.%s" % (name, key))
+                self.assertNotEqual(hit["fit"], want, "%s.%s" % (name, key))
+
+    def test_the_labels_are_derived_from_this_symbols_own_ratios(self):
+        rows = self.rig.rows
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        want_sig = setups.volume_signal(
+            setups.ud_ratio(rows, setups.UD_BARS),
+            setups.ud_weighted(rows, setups.UD_BARS))
+        want_trend = setups.accumulation_trend(
+            setups.ud_ratio(rows, setups.UD_BARS),
+            setups.ud_ratio(rows, setups.UD_SHORT_BARS))
+        for name, hit in m.items():
+            self.assertEqual(hit["volume_signal"], want_sig, name)
+            self.assertEqual(hit["accumulation_trend"], want_trend, name)
+
+    def test_the_labels_are_always_strings_never_none(self):
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        for name, hit in m.items():
+            self.assertIn(hit["volume_signal"], setups.VOLUME_SIGNALS, name)
+            self.assertIn(hit["accumulation_trend"], setups.ACCUMULATION_TRENDS,
+                          name)
+
+    def test_the_block_comes_from_ctx_and_not_from_the_predicates_evidence(self):
+        """A predicate whose evidence omits every volume key must STILL get all
+        five. This is what makes the contract independent of five separate
+        payload dicts."""
+        orig = setups.REGISTRY["COILED"]
+        setups.REGISTRY["COILED"] = (
+            lambda o, ctx, strict, diag: {"contraction": 0.5, "pos_in_base": 0.9,
+                                          "dryup": 0.6},
+            lambda ev: 5.0)
+        try:
+            m = setups.evaluate(self.rig.scored(), self.rs)
+        finally:
+            setups.REGISTRY["COILED"] = orig
+        for key in setups.VOLUME_KEYS:
+            self.assertNotIn(key, m["COILED"]["evidence"], key)
+            self.assertIn(key, m["COILED"], key)
+        self.assertEqual(m["COILED"]["ud_ratio"],
+                         setups.ud_ratio(self.rig.rows, setups.UD_BARS))
+
+    def test_confluence_reports_the_same_block_as_its_constituents(self):
+        m = setups.evaluate(self.rig.scored(), self.rs)
+        first = [n for n in setups.SETUPS if n in m][0]
+        for key in setups.VOLUME_KEYS:
+            self.assertEqual(m["CONFLUENCE"][key], m[first][key], key)
+
+    def test_confluence_carries_none_ratios_through_rather_than_dropping_them(self):
+        """None means unmeasurable and must REACH the renderer as None."""
+        block = {"ud_ratio": None, "ud_weighted": None, "ud_20": None,
+                 "volume_signal": setups.SIGNAL_UNKNOWN,
+                 "accumulation_trend": setups.TREND_UNKNOWN}
+        matched = {"COILED": dict(block, fit=7.0, evidence={"ud_ratio": None}),
+                   "LEADER": dict(block, fit=8.0, evidence={"ud_ratio": None})}
+        out = setups._add_confluence(matched)
+        for key in setups.VOLUME_KEYS:
+            self.assertIn(key, out["CONFLUENCE"], key)
+        self.assertIsNone(out["CONFLUENCE"]["ud_weighted"])
+        self.assertEqual(out["CONFLUENCE"]["volume_signal"],
+                         setups.SIGNAL_UNKNOWN)
+
+    def test_confluence_copies_the_block_rather_than_recomputing_it(self):
+        """Values distinct from every fit in the pair, so copying a fit up
+        fails; and a label that disagrees with its own ratios, so a CONFLUENCE
+        that re-derived the labels would print something its constituents do
+        not."""
+        block = {"ud_ratio": 2.5, "ud_weighted": 0.4, "ud_20": 0.9,
+                 "volume_signal": "sentinel-signal",
+                 "accumulation_trend": "sentinel-trend"}
+        matched = {"COILED": dict(block, fit=7.0, evidence={"ud_ratio": 2.5}),
+                   "LEADER": dict(block, fit=8.0, evidence={"ud_ratio": 2.5})}
+        out = setups._add_confluence(matched)
+        for key, want in block.items():
+            self.assertEqual(out["CONFLUENCE"][key], want, key)
+        self.assertEqual(out["CONFLUENCE"]["evidence"]["ud_ratio"], 2.5)
+
+
+class TestDistributionFloorPair(unittest.TestCase):
+    def test_it_is_a_loosened_strict_pair_like_every_other_threshold(self):
+        self.assertIsInstance(setups.DISTRIBUTION_FLOOR, tuple)
+        self.assertEqual(len(setups.DISTRIBUTION_FLOOR), 2)
+
+    def test_strict_is_never_looser_than_loosened(self):
+        """A LOWER floor excludes FEWER names, so a strict half below the
+        loosened one would let strict match something loosened does not and
+        break the subset invariant that holds everywhere else in this file."""
+        lo, st = setups.DISTRIBUTION_FLOOR
+        self.assertGreaterEqual(st, lo)
+
+    def test_the_floor_is_the_documented_one(self):
+        self.assertEqual(setups.DISTRIBUTION_FLOOR[0], 1.0)
+
+    def test_it_is_not_in_the_per_setup_threshold_table(self):
+        """One statement about the symbol, applied identically to all five.
+        Five copies of the same pair would be five places to disagree -- and
+        test_the_threshold_table_has_no_orphan_entries would then have to be
+        told about a key no setup varies."""
+        for name, keys in setups.THRESHOLDS.items():
+            self.assertNotIn("distribution_floor", keys, name)
+
+
+class TestNotDistributing(unittest.TestCase):
+    """The shared helper, on its own, at every corner of its two conditions."""
+
+    def ctx(self, weighted, short):
+        return {"ud_weighted": weighted, "ud_20": short}
+
+    def test_both_below_the_floor_is_the_only_rejection(self):
+        self.assertFalse(setups._not_distributing(self.ctx(0.9, 0.9), False))
+
+    def test_either_one_at_or_above_the_floor_passes(self):
+        self.assertTrue(setups._not_distributing(self.ctx(1.0, 0.9), False))
+        self.assertTrue(setups._not_distributing(self.ctx(0.9, 1.0), False))
+        self.assertTrue(setups._not_distributing(self.ctx(1.4, 1.4), False))
+
+    def test_a_none_on_either_side_is_not_a_confirmation(self):
+        self.assertTrue(setups._not_distributing(self.ctx(None, 0.1), False))
+        self.assertTrue(setups._not_distributing(self.ctx(0.1, None), False))
+        self.assertTrue(setups._not_distributing(self.ctx(None, None), False))
+
+    def test_a_missing_key_behaves_like_an_unmeasurable_one(self):
+        self.assertTrue(setups._not_distributing({}, False))
+
+    def test_a_measured_zero_rejects_through_the_comparison(self):
+        self.assertFalse(setups._not_distributing(self.ctx(0.0, 0.0), False))
+
+    def test_strict_reads_the_second_half_of_the_pair(self):
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertTrue(setups._not_distributing(self.ctx(1.2, 1.2), False))
+            self.assertFalse(setups._not_distributing(self.ctx(1.2, 1.2), True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_label_names_the_passing_condition_and_its_floor(self):
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIn("1.00", setups._distributing_label(False))
+            self.assertIn("1.50", setups._distributing_label(True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+
+class TestEverySetupConsultsTheDistributionGate(unittest.TestCase):
+    """A gate wired into four predicates out of five is the failure mode this
+    class exists for: the fifth would go on matching distributed names in the
+    one table nobody checked."""
+
+    def setUp(self):
+        self.rig = Rig()
+        self.rig.seed()
+        self.rs = {"1m": 8.0, "3m": 14.0}
+
+    def tearDown(self):
+        self.rig.clear()
+
+    def test_a_gate_that_always_rejects_empties_every_table(self):
+        baseline = setups.evaluate(self.rig.scored(), self.rs)
+        self.assertTrue(baseline, "the rig stopped matching anything")
+        orig = setups._not_distributing
+        setups._not_distributing = lambda ctx, strict: False
+        try:
+            out = setups.evaluate(self.rig.scored(), self.rs)
+        finally:
+            setups._not_distributing = orig
+        self.assertEqual(out, {},
+                         "these setups never consulted the gate: %s"
+                         % sorted(out))
+
+    def test_a_gate_that_always_passes_leaves_the_tables_alone(self):
+        """The paired assertion, so the test above cannot be satisfied by a
+        patch that breaks evaluate() outright."""
+        baseline = setups.evaluate(self.rig.scored(), self.rs)
+        orig = setups._not_distributing
+        setups._not_distributing = lambda ctx, strict: True
+        try:
+            out = setups.evaluate(self.rig.scored(), self.rs)
+        finally:
+            setups._not_distributing = orig
+        self.assertEqual(sorted(out), sorted(baseline))
+
+
+class TestFitAccumulationBlend(unittest.TestCase):
+    """The composed term: two ladders and a trend deduction.
+
+    test_setups_series.TestFitAccumulation pins the LADDER by passing the same
+    ratio to both arms; this pins what happens when they disagree, and what the
+    20-bar window costs.
+    """
+
+    def test_the_two_ladders_share_the_term_equally(self):
+        self.assertEqual(setups.ACC_WEIGHT_UD, 0.5)
+        self.assertEqual(setups.ACC_WEIGHT_WEIGHTED, 0.5)
+
+    def test_the_weights_sum_to_one_so_an_aligned_name_is_unchanged(self):
+        """The compatibility property, asserted rather than assumed: a name
+        whose two ratios agree scores exactly the rung it always did."""
+        self.assertAlmostEqual(setups.ACC_WEIGHT_UD + setups.ACC_WEIGHT_WEIGHTED,
+                               1.0, places=12)
+        for ud, rung in ((2.50, 10.0), (2.00, 9.0), (1.50, 8.0), (1.25, 6.0),
+                         (1.00, 4.0), (0.50, 2.0)):
+            self.assertAlmostEqual(setups.fit_accumulation(ud, ud, ud), rung,
+                                   places=9, msg=str(ud))
+
+    def test_a_disagreement_lands_between_the_two_rungs(self):
+        """CONCORDBIO: 3.74 close-to-close tops the ladder at 10, 0.59
+        close-weighted sits on the 2.0 floor. Half of each is 6.0 -- and the
+        20-bar window is held at the 50-bar value so only the blend moves."""
+        self.assertAlmostEqual(setups.fit_accumulation(3.74, 0.59, 3.74), 6.0,
+                               places=9)
+
+    def test_the_close_weighted_arm_is_not_ignored(self):
+        """Two names identical on the conventional ratio must not tie."""
+        self.assertGreater(setups.fit_accumulation(2.0, 2.0, 2.0),
+                           setups.fit_accumulation(2.0, 0.5, 2.0))
+
+    def test_the_close_to_close_arm_is_not_ignored(self):
+        self.assertGreater(setups.fit_accumulation(2.0, 2.0, 2.0),
+                           setups.fit_accumulation(0.5, 2.0, 2.0))
+
+    def test_the_two_arms_are_not_interchangeable(self):
+        """A swapped pair of arguments must be visible. Equal weights make the
+        SCORE symmetric, so the trend -- which reads the close-to-close ratio
+        and not the close-weighted one -- is what tells them apart."""
+        self.assertNotAlmostEqual(setups.fit_accumulation(3.0, 1.0, 1.0),
+                                  setups.fit_accumulation(1.0, 3.0, 1.0),
+                                  places=6)
+
+    def test_the_penalties_are_the_documented_ones(self):
+        self.assertEqual(setups.TREND_PENALTY,
+                         {setups.TREND_REVERSED: 2.0, setups.TREND_FADING: 1.0})
+
+    def test_a_fading_trend_costs_one_ladder_point(self):
+        steady = setups.fit_accumulation(2.0, 2.0, 2.0)
+        fading = setups.fit_accumulation(2.0, 2.0, 1.2)
+        self.assertEqual(setups.accumulation_trend(2.0, 1.2), setups.TREND_FADING)
+        self.assertAlmostEqual(steady - fading, 1.0, places=9)
+
+    def test_a_reversed_trend_costs_two(self):
+        steady = setups.fit_accumulation(2.0, 2.0, 2.0)
+        rev = setups.fit_accumulation(2.0, 2.0, 0.9)
+        self.assertEqual(setups.accumulation_trend(2.0, 0.9),
+                         setups.TREND_REVERSED)
+        self.assertAlmostEqual(steady - rev, 2.0, places=9)
+
+    def test_reversed_costs_strictly_more_than_fading(self):
+        self.assertLess(setups.fit_accumulation(2.0, 2.0, 0.9),
+                        setups.fit_accumulation(2.0, 2.0, 1.2))
+
+    def test_the_untroubled_trends_cost_nothing(self):
+        base = setups.fit_accumulation(2.0, 2.0, 2.0)
+        for near, label in ((1.7, setups.TREND_FLATTENING),
+                            (2.0, setups.TREND_STEADY),
+                            (2.8, setups.TREND_STRENGTHENING)):
+            self.assertEqual(setups.accumulation_trend(2.0, near), label)
+            self.assertAlmostEqual(setups.fit_accumulation(2.0, 2.0, near),
+                                   base, places=9, msg=label)
+
+    def test_an_unmeasurable_trend_is_not_charged_twice(self):
+        """The ratio that could not be measured is already paying through its
+        own ladder arm; deducting again would price a data gap as a finding."""
+        self.assertAlmostEqual(setups.fit_accumulation(2.0, 2.0, None),
+                               setups.fit_accumulation(2.0, 2.0, 2.0), places=9)
+
+    def test_an_unmeasurable_pair_scores_the_floor(self):
+        self.assertAlmostEqual(setups.fit_accumulation(None, None, None),
+                               setups.NO_ACCUMULATION, places=9)
+
+    def test_the_result_never_leaves_zero_to_ten(self):
+        values = (None, 0.0, 0.5, 1.0, 1.25, 1.6, 2.5, 40.0)
+        for ud in values:
+            for w in values:
+                for near in values:
+                    out = setups.fit_accumulation(ud, w, near)
+                    self.assertTrue(0.0 <= out <= 10.0,
+                                    "%r/%r/%r -> %r" % (ud, w, near, out))
+
+    def test_the_floor_is_reachable_and_is_exactly_zero(self):
+        """Both ladders at the 2.0 floor and a reversed trend. The lower clamp
+        is documented as defensive; this shows the arithmetic reaches it."""
+        self.assertEqual(setups.accumulation_trend(0.9, 0.5),
+                         setups.TREND_REVERSED)
+        self.assertAlmostEqual(setups.fit_accumulation(0.9, 0.9, 0.5), 0.0,
+                               places=9)
+
+    def test_all_three_arguments_are_required(self):
+        """A default would let a call site that forgot the close-weighted ratio
+        score every name as if it were unmeasurable -- a silent halving of the
+        term across a whole scan, visible nowhere."""
+        with self.assertRaises(TypeError):
+            setups.fit_accumulation(1.6)
+        with self.assertRaises(TypeError):
+            setups.fit_accumulation(1.6, 1.6)
+
+    def test_the_penalty_reads_the_same_trend_the_report_prints(self):
+        """A second copy of the banding here would let a row be docked for a
+        trend its own label denies."""
+        calls = []
+        orig = setups.accumulation_trend
+        setups.accumulation_trend = lambda far, near: (calls.append((far, near))
+                                                       or orig(far, near))
+        try:
+            setups.fit_accumulation(1.7, 1.4, 0.52)
+        finally:
+            setups.accumulation_trend = orig
+        self.assertEqual(calls, [(1.7, 0.52)])
+
+
+class TestEverySetupPricesAllThreeNumbers(unittest.TestCase):
+    """The wiring, per setup: every fit_* must pass all three keys through.
+
+    A fit that passed only ud_ratio would score every name as if its
+    close-weighted ratio were unmeasurable -- half the term, silently, in that
+    one table.
+    """
+
+    EVIDENCE = {
+        "COILED": {"contraction": 0.5, "pos_in_base": 0.9, "dryup": 0.6},
+        "BREAKOUT": {"vol_mult": 2.5, "pct_above_base": 1.0, "base_bars": 20,
+                     "tightness": 5.0, "volume_light": False},
+        "LEADER": {"pct_from_high": 3.0, "rs_1m": 3.0, "rs_3m": 12.0,
+                   "full_stack": True},
+        "PULLBACK": {"dist_to_ma_pct": 0.5, "rsi": 48.0, "dryup": 0.8,
+                     "pullback_vol_ratio": 0.45,
+                     "retrace_of_52w_range_pct": 30.0},
+        "TURN": {"bars_since_cross": 15, "macd_hist": 0.4, "sma200_rising": True,
+                 "vol_expansion": 1.35},
+    }
+
+    def fit(self, name, **vol):
+        _, fit_fn = setups.REGISTRY[name]
+        return fit_fn(dict(self.EVIDENCE[name], **vol))
+
+    def test_each_fit_reads_the_close_weighted_ratio(self):
+        for name, w in setups.FIT_WEIGHTS.items():
+            strong = self.fit(name, ud_ratio=2.0, ud_weighted=2.0, ud_20=2.0)
+            sold = self.fit(name, ud_ratio=2.0, ud_weighted=0.5, ud_20=2.0)
+            self.assertAlmostEqual(strong - sold,
+                                   round(w["accumulation"] * 0.5 * 7.0, 10),
+                                   places=6, msg=name)
+
+    def test_each_fit_reads_the_twenty_bar_ratio(self):
+        for name, w in setups.FIT_WEIGHTS.items():
+            steady = self.fit(name, ud_ratio=2.0, ud_weighted=2.0, ud_20=2.0)
+            rev = self.fit(name, ud_ratio=2.0, ud_weighted=2.0, ud_20=0.9)
+            self.assertAlmostEqual(steady - rev, w["accumulation"] * 2.0,
+                                   places=6, msg=name)
+
+    def test_every_setups_weights_still_sum_to_exactly_one(self):
+        """Nothing was bolted on top of the score: the term learned to read two
+        more numbers, it did not take a sixth share of the total."""
+        for name, w in setups.FIT_WEIGHTS.items():
+            self.assertEqual(sum(w.values()), 1.0, msg=name)
+            self.assertIn("accumulation", w, name)
 
 
 if __name__ == "__main__":

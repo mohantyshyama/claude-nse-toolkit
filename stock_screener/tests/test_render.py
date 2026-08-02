@@ -7,7 +7,12 @@ def row(sym="TCS", **over):
     r = {"symbol": sym, "sector": "Information Technology", "price": 3200.0,
          "fit": 8.4, "total": 6.9, "trigger_total": 7.4, "trigger_price": 3300.0,
          "stop": 3100.0, "rr": 2.1, "rs_1m": 3.2, "rs_3m": 11.5,
-         "ud_ratio": 1.47,
+         # The five volume fields build_result_row puts on every row. Every
+         # default differs from every other, so a column reading a neighbouring
+         # field renders a visibly wrong value instead of the right one.
+         "ud_ratio": 1.47, "ud_weighted": 0.63, "ud_20": 2.85,
+         "volume_signal": "accumulation",
+         "accumulation_trend": "strengthening",
          "vetoed": False, "action": "BUY HALF", "match_count": 1,
          "evidence": {"vol_mult": 2.4, "pct_above_base": 1.8, "base_bars": 22,
                       "tightness": 6.0, "volume_light": False,
@@ -139,6 +144,264 @@ class TestUpDownVolumeColumn(unittest.TestCase):
         self.assertIn("down-closes", key)
         self.assertIn("50 sessions", key)
         self.assertIn("1.0", key)
+
+    def test_the_ratio_column_reads_the_plain_ratio_not_the_weighted_one(self):
+        """Three ratios now sit on the row and only this one is printed. The
+        weighted ratio is a different measurement of the same 50 bars, so a
+        column reading it renders a perfectly plausible number."""
+        out = screener.render_table([row(ud_ratio=1.47, ud_weighted=9.91,
+                                         ud_20=8.82)], "LEADER",
+                                    shown=1, total=1)
+        headers = [c.strip() for c in out.splitlines()[1].strip("|").split("|")]
+        cells = [c.strip() for c in out.splitlines()[-1].strip("|").split("|")]
+        self.assertEqual(cells[headers.index(self.HEADER)], "1.47")
+        self.assertNotIn("9.91", out)
+        self.assertNotIn("8.82", out)
+
+
+class TestVolumeSignalColumns(unittest.TestCase):
+    """Volume Signal and Accumulation Trend: the two labels that say what the
+    up/down ratio MEANS.
+
+    The ratio alone cannot separate a name being accumulated from one being
+    distributed into strength -- both print a number above 1.0 -- so the labels
+    are base columns beside it rather than setup-specific evidence.
+    """
+
+    SIGNAL = "Volume Signal"
+    TREND = "Accumulation Trend"
+    RATIO = "Up/Down Volume Ratio"
+
+    # Disjoint vocabularies on purpose: no signal is ever `steady` and no trend
+    # is ever `supported`, so a test fixture cannot make a transposition of the
+    # two columns look like a plausible row.
+    SIGNALS = ("accumulation", "distribution-into-strength", "supported",
+               "distribution", "unknown")
+    TRENDS = ("strengthening", "steady", "flattening", "fading", "reversed",
+              "unknown")
+
+    def cells(self, out, line=-1):
+        headers = [c.strip() for c in out.splitlines()[1].strip("|").split("|")]
+        row_cells = [c.strip() for c in out.splitlines()[line].strip("|").split("|")]
+        return dict(zip(headers, row_cells))
+
+    def test_both_are_base_columns_and_neither_is_an_evidence_slot(self):
+        for header in (self.SIGNAL, self.TREND):
+            self.assertIn(header, screener.BASE_COLUMNS)
+            for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
+                self.assertNotIn(header,
+                                 [h for h, _ in screener.EVIDENCE_COLUMNS[name]],
+                                 "%s / %s" % (name, header))
+
+    def test_the_three_volume_columns_sit_together_after_relative_strength(self):
+        """Placement is specified, not cosmetic: the cross-sectional block is
+        relative strength and then the three volume columns in one run. A label
+        parked away from the ratio it interprets reads as an unrelated verdict.
+
+        Asserted as a contiguous slice, so a column inserted BETWEEN two of them
+        fails even though every individual `in BASE_COLUMNS` still holds.
+        """
+        cols = screener.BASE_COLUMNS
+        start = cols.index("Relative Strength (3-month)")
+        self.assertEqual(cols[start:start + 4],
+                         ["Relative Strength (3-month)", self.RATIO,
+                          self.SIGNAL, self.TREND])
+
+    def test_every_setup_table_carries_both_including_confluence(self):
+        """CONFLUENCE included, whose two evidence slots are already the matched
+        label and the mean fit -- an evidence-slot implementation could not put
+        these there at all."""
+        for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
+            out = screener.render_table(
+                [row(volume_signal="supported", accumulation_trend="fading")],
+                name, shown=1, total=1)
+            cells = self.cells(out)
+            self.assertEqual(cells[self.SIGNAL], "supported", name)
+            self.assertEqual(cells[self.TREND], "fading", name)
+
+    def test_the_headers_are_full_words(self):
+        """House style: 'Average True Range', never 'ATR'."""
+        for banned in ("Vol ", "Vol.", "Sig.", "Accum.", "Acc ", "Trnd", "U/D"):
+            self.assertNotIn(banned, self.SIGNAL)
+            self.assertNotIn(banned, self.TREND)
+        # ...and positively: every word is spelled out, none truncated.
+        for header in (self.SIGNAL, self.TREND):
+            for word in header.split():
+                self.assertGreaterEqual(len(word), 5, header)
+                self.assertFalse(word.endswith("."), header)
+
+    def test_each_row_prints_its_own_labels(self):
+        """Three rows, six labels, no value repeated anywhere. A fixture with
+        one label down the column cannot tell a per-row read from a constant,
+        and cannot tell either column from the other."""
+        rows = [row("AAA", volume_signal="accumulation",
+                    accumulation_trend="strengthening"),
+                row("BBB", volume_signal="distribution-into-strength",
+                    accumulation_trend="fading"),
+                row("CCC", volume_signal="supported",
+                    accumulation_trend="reversed")]
+        out = screener.render_table(rows, "LEADER", shown=3, total=3)
+        printed = [(self.cells(out, i)[self.SIGNAL],
+                    self.cells(out, i)[self.TREND]) for i in (-3, -2, -1)]
+        self.assertEqual(printed,
+                         [("accumulation", "strengthening"),
+                          ("distribution-into-strength", "fading"),
+                          ("supported", "reversed")])
+
+    def test_the_two_columns_are_not_transposed(self):
+        """The single mutant a shared vocabulary would hide. `supported` is a
+        signal and never a trend; `reversed` is a trend and never a signal."""
+        out = screener.render_table(
+            [row(volume_signal="supported", accumulation_trend="reversed")],
+            "LEADER", shown=1, total=1)
+        cells = self.cells(out)
+        self.assertEqual(cells[self.SIGNAL], "supported")
+        self.assertEqual(cells[self.TREND], "reversed")
+
+    def test_neither_label_is_rendered_from_a_ratio(self):
+        """A cell wired to ud_weighted or ud_20 would print a number where a
+        word belongs, and read as a fourth ratio nobody asked for."""
+        out = screener.render_table([row(ud_ratio=1.47, ud_weighted=0.63,
+                                         ud_20=2.85)], "LEADER",
+                                    shown=1, total=1)
+        cells = self.cells(out)
+        self.assertEqual(cells[self.SIGNAL], "accumulation")
+        self.assertEqual(cells[self.TREND], "strengthening")
+
+    def test_every_documented_label_renders_verbatim(self):
+        """The hyphen in `distribution-into-strength` survives, and nothing is
+        abbreviated or title-cased on the way to the cell -- the key defines
+        these words exactly as the CSV writes them."""
+        for signal in self.SIGNALS:
+            out = screener.render_table([row(volume_signal=signal)], "LEADER",
+                                        shown=1, total=1)
+            self.assertEqual(self.cells(out)[self.SIGNAL], signal)
+        for trend in self.TRENDS:
+            out = screener.render_table([row(accumulation_trend=trend)],
+                                        "LEADER", shown=1, total=1)
+            self.assertEqual(self.cells(out)[self.TREND], trend)
+
+    def test_a_missing_label_prints_a_dash_not_the_word_none(self):
+        """`unknown` is a real label -- too little history to classify -- so a
+        row carrying no label at all cannot borrow it. A bare str() would print
+        the four characters `None` and read as a sixth signal."""
+        for key, header in ((("volume_signal"), self.SIGNAL),
+                            (("accumulation_trend"), self.TREND)):
+            out = screener.render_table([row(**{key: None})], "LEADER",
+                                        shown=1, total=1)
+            self.assertEqual(self.cells(out)[header], "-")
+            self.assertNotIn("None", out)
+
+    def test_a_row_without_either_key_raises_rather_than_printing_a_dash(self):
+        """build_result_row always sets both, so a missing key is a bug. A
+        `.get(..., "unknown")` would fill every table with a real-looking label
+        that was never measured."""
+        for key in ("volume_signal", "accumulation_trend"):
+            r = row()
+            del r[key]
+            with self.assertRaises(KeyError):
+                screener.render_table([r], "LEADER", shown=1, total=1)
+
+    def test_the_columns_sit_where_the_header_row_says_they_do(self):
+        """Header order and cell order are built from two different lists, so a
+        column added to one and not the other misaligns every cell to its right
+        without changing the count of either."""
+        out = screener.render_table(
+            [row(volume_signal="distribution", accumulation_trend="flattening")],
+            "LEADER", shown=1, total=1)
+        headers = [c.strip() for c in out.splitlines()[1].strip("|").split("|")]
+        cells = [c.strip() for c in out.splitlines()[-1].strip("|").split("|")]
+        self.assertEqual(len(headers), len(cells))
+        self.assertEqual(cells[headers.index(self.SIGNAL)], "distribution")
+        self.assertEqual(cells[headers.index(self.TREND)], "flattening")
+
+    def test_no_existing_column_was_dropped_to_make_room(self):
+        """The table is wide and this made it wider. The house rule is that a
+        narrower table is harder to read, not faster -- so every column that was
+        there before is still there, and the two new ones are additions."""
+        for header in ("Rank", "Symbol", "Sector", "Price", "Setup Fit",
+                       "Score Now (catalyst-neutral)", "Score at Trigger",
+                       "Risk:Reward", "Relative Strength (3-month)",
+                       self.RATIO):
+            self.assertIn(header, screener.BASE_COLUMNS)
+        for header in ("Trigger Price", "Stop (1.5x Average True Range)",
+                       "Action"):
+            self.assertIn(header, screener.TAIL_COLUMNS)
+        out = screener.render_table([row()], "LEADER", shown=1, total=1)
+        headers = [c.strip() for c in out.splitlines()[1].strip("|").split("|")]
+        self.assertEqual(len(headers), len(set(headers)))
+
+    def sections(self, setup="LEADER"):
+        """The key text split into the sentence that defines each column.
+
+        Asserting a label merely appears SOMEWHERE in the key is too weak to be
+        worth writing: `unknown` and `distribution` are each used by both
+        columns, so a key that dropped one definition entirely would still
+        contain the word and pass. Each label is checked inside its own
+        column's sentence instead.
+        """
+        key = screener.render_key(setup)
+        self.assertIn(self.SIGNAL, key, setup)
+        self.assertIn(self.TREND, key, setup)
+        signal = key.split(self.TREND)[0].split(self.SIGNAL, 1)[1]
+        trend = key.split(self.TREND, 1)[1].split("The CSV export")[0]
+        self.assertTrue(signal.strip() and trend.strip())
+        return signal, trend
+
+    def test_the_key_defines_both_columns_and_every_label_they_can_print(self):
+        """The key is the only place a reader learns that a healthy-looking
+        ratio can be distribution. Every label either column can print is
+        defined inside that column's own sentence, so no cell is ever
+        undefined text on the screen."""
+        signal, trend = self.sections()
+        for label in self.SIGNALS:
+            self.assertIn(label, signal, label)
+        for label in self.TRENDS:
+            self.assertIn(label, trend, label)
+
+    def test_the_key_does_not_define_the_labels_in_the_wrong_column(self):
+        """The mirror of the transposition test on the table itself: a key that
+        listed the trend words under Volume Signal would send a reader looking
+        for `fading` in the wrong column. The vocabularies are disjoint, so
+        each sentence must contain only its own."""
+        signal, trend = self.sections()
+        for label in ("strengthening", "steady", "flattening", "fading",
+                      "reversed"):
+            self.assertNotIn(label, signal, label)
+        for label in ("accumulation", "distribution-into-strength",
+                      "supported"):
+            self.assertNotIn(label, trend, label)
+
+    def test_the_key_explains_distribution_into_strength_in_full(self):
+        """The case a reader most needs explained: a strong up/down ratio while
+        sellers control every close. A key that merely listed the label would
+        leave the reader to guess which way it cuts."""
+        key = screener.render_key("LEADER")
+        self.assertIn("distribution-into-strength", key)
+        self.assertIn("sellers control", key)
+        self.assertIn("close", key)
+
+    def test_the_key_explains_the_supported_label_as_a_base_forming(self):
+        """Its mirror image: soft price is not automatically weakness."""
+        key = screener.render_key("LEADER")
+        self.assertIn("supported", key)
+        self.assertIn("defend every dip", key)
+
+    def test_the_key_says_the_trend_compares_twenty_bars_against_fifty(self):
+        """Asserted inside the trend sentence and with the windows spelled out.
+        A bare `"50" in key` passes on the 50-session ratio defined two
+        sentences earlier and on the 500-name universe mentioned above that, so
+        it could not fail however vague the trend definition became."""
+        _, trend = self.sections()
+        self.assertIn("20 sessions", trend)
+        self.assertIn("50-session", trend)
+
+    def test_the_key_is_printed_under_every_setup_table(self):
+        """Including CONFLUENCE, whose table carries the same three columns."""
+        for name in list(screener.setups.SETUPS) + ["CONFLUENCE"]:
+            signal, trend = self.sections(name)
+            self.assertIn("distribution-into-strength", signal, name)
+            self.assertIn("reversed", trend, name)
 
 
 class TestTable(unittest.TestCase):

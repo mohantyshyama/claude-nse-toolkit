@@ -542,19 +542,31 @@ class TestContextExposesTheUpDownRatio(unittest.TestCase):
 
 
 class TestFitAccumulation(unittest.TestCase):
-    """The shared 0-10 accumulation sub-score.
+    """The shared 0-10 accumulation sub-score, on its LADDER.
 
     ONE ladder for all five setups, so that an 8 for accumulation means the same
     thing under LEADER as under COILED. The per-setup tests assert how much each
     setup WEIGHTS it; this asserts what it says.
+
+    Every case here passes the SAME ratio as both the close-to-close and the
+    close-weighted argument, and None as the 20-bar one. That is not a
+    convenience: the two ladder weights sum to exactly 1.0 and an unmeasurable
+    trend is charged nothing, so an aligned name scores exactly what it scored
+    before the term learned about the close, and every number below is the
+    number this file has always asserted. The BLENDING of two disagreeing ratios
+    and the trend penalty are separate behaviours, tested in test_confluence.
     """
+
+    @staticmethod
+    def ladder(ud):
+        return setups.fit_accumulation(ud, ud, None)
 
     #: (ratio, sub-score) at every rung boundary, from the spec table.
     RUNGS = [(2.50, 10.0), (2.00, 9.0), (1.50, 8.0), (1.25, 6.0), (1.00, 4.0)]
 
     def test_each_rung_is_returned_at_its_own_floor(self):
         for ud, sub in self.RUNGS:
-            self.assertEqual(setups.fit_accumulation(ud), sub, msg="at %s" % ud)
+            self.assertEqual(self.ladder(ud), sub, msg="at %s" % ud)
 
     def test_each_floor_is_inclusive_and_a_hair_below_drops_a_rung(self):
         """Both sides of every boundary, so no cut can move in either direction.
@@ -564,26 +576,26 @@ class TestFitAccumulation(unittest.TestCase):
         """
         for i, (ud, _sub) in enumerate(self.RUNGS):
             below = self.RUNGS[i + 1][1] if i + 1 < len(self.RUNGS) else 2.0
-            self.assertEqual(setups.fit_accumulation(ud - 0.001), below,
+            self.assertEqual(self.ladder(ud - 0.001), below,
                              msg="just below %s" % ud)
 
     def test_above_the_top_rung_stays_at_ten(self):
         """The ladder does not keep climbing: 10 is the cap, and a name at 40x
         must not out-score one at 2.5x by an unbounded amount."""
         for ud in (2.50, 3.0, 12.0, 400.0):
-            self.assertEqual(setups.fit_accumulation(ud), 10.0, msg=str(ud))
+            self.assertEqual(self.ladder(ud), 10.0, msg=str(ud))
 
     def test_below_one_scores_the_floor(self):
         """Under 1.0 is net DISTRIBUTION -- more volume on down days than up."""
         for ud in (0.99, 0.5, 0.0):
-            self.assertEqual(setups.fit_accumulation(ud), 2.0, msg=str(ud))
+            self.assertEqual(self.ladder(ud), 2.0, msg=str(ud))
 
     def test_the_floor_is_two_and_not_zero(self):
         """Deliberately not zero. Below 1.0 is a real measured finding about a
         name that cleared every other gate, and zeroing the term would let one
         soft input dominate a five-term score."""
         self.assertEqual(setups.NO_ACCUMULATION, 2.0)
-        self.assertEqual(setups.fit_accumulation(0.4), 2.0)
+        self.assertEqual(self.ladder(0.4), 2.0)
 
     def test_an_unmeasurable_ratio_scores_the_floor_not_the_top(self):
         """None means no down-volume in the window, so the ratio cannot be
@@ -591,9 +603,9 @@ class TestFitAccumulation(unittest.TestCase):
         the gates: a score that rewarded the ABSENCE of evidence would rank an
         unmeasurable name above a measured one.
         """
-        self.assertEqual(setups.fit_accumulation(None), 2.0)
-        self.assertEqual(setups.fit_accumulation(None),
-                         setups.fit_accumulation(0.5))
+        self.assertEqual(self.ladder(None), 2.0)
+        self.assertEqual(self.ladder(None),
+                         self.ladder(0.5))
 
     def test_it_is_monotone_in_the_ratio(self):
         """The shape itself, not a list of points: more accumulation is never
@@ -601,7 +613,7 @@ class TestFitAccumulation(unittest.TestCase):
         point assertions above and fail this."""
         xs = [0.0, 0.5, 0.99, 1.0, 1.24, 1.25, 1.49, 1.5, 1.99, 2.0, 2.49,
               2.5, 9.0]
-        scores = [setups.fit_accumulation(x) for x in xs]
+        scores = [self.ladder(x) for x in xs]
         self.assertEqual(scores, sorted(scores))
 
     def test_the_ladder_matches_the_published_cut_table(self):

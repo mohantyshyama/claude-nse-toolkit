@@ -39,7 +39,13 @@ def ctx(bars_since_cross=15, **over):
     c = {"rows": trend_series(260), "rs": {"1m": 2.0, "3m": 6.0},
          "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
          "bars_since_cross": bars_since_cross, "vol_expansion": 1.35,
-         "ud_ratio": 1.60}
+         # ud_weighted 1.30 and ud_20 1.55 alongside it: three DIFFERENT
+         # numbers, so a fit term reading the wrong key, or a gate reading the
+         # 50-bar ratio where it means the 20-bar one, changes the answer. Both
+         # clear the 1.0 distribution floor, and 1.55/1.60 bands "steady", so
+         # every pre-existing case here still turns on the condition it was
+         # written for rather than on a trend penalty.
+         "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
     c.update(over)
     return c
 
@@ -154,8 +160,10 @@ class TestTurnMatches(unittest.TestCase):
         ev = setups.match_turn(result(), ctx())
         self.assertEqual(set(ev), {"bars_since_cross", "macd_hist",
                                    "sma200_rising", "vol_expansion",
-                                   "ud_ratio"})
+                                   "ud_ratio", "ud_weighted", "ud_20"})
         self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
+        self.assertAlmostEqual(ev["ud_weighted"], 1.30, places=6)
+        self.assertAlmostEqual(ev["ud_20"], 1.55, places=6)
         self.assertAlmostEqual(ev["macd_hist"], 0.4, places=6)
         self.assertAlmostEqual(ev["vol_expansion"], 1.35, places=6)
         self.assertIs(ev["sma200_rising"], True)
@@ -321,8 +329,13 @@ class TestTurnFit(unittest.TestCase):
         # 1.60 matches ctx()'s ratio, bands to 8 mid-ladder, and clears TURN's
         # own 1.25/1.50 gate -- so this hand-built evidence describes a name the
         # screen would actually show.
+        # ud_weighted 1.30 bands to 6 and ud_20 1.55 makes the trend "steady",
+        # so accumulation is 7.0 and every remainder constant below derives
+        # from it. Three DIFFERENT numbers, so a fit reading the wrong one of
+        # them moves every case in this class rather than none of them.
         e = {"bars_since_cross": 15, "macd_hist": 0.4, "sma200_rising": True,
-             "vol_expansion": 1.35, "ud_ratio": 1.60}
+             "vol_expansion": 1.35,
+             "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
         e.update(over)
         return e
 
@@ -341,22 +354,23 @@ class TestTurnFit(unittest.TestCase):
 
     def test_weights_are_thirty_twenty_five_fifteen_ten_twenty(self):
         """cross 15 -> 9, slope True -> 10, expansion 1.35 -> 10, macd + -> 10,
-        accumulation 1.60 -> 8.
-        0.30*9 + 0.25*10 + 0.15*10 + 0.10*10 + 0.20*8
-          = 2.7 + 2.5 + 1.5 + 1.0 + 1.6 = 9.3. Each further case moves exactly
+        accumulation 7.0.
+        0.30*9 + 0.25*10 + 0.15*10 + 0.10*10 + 0.20*7
+          = 2.7 + 2.5 + 1.5 + 1.0 + 1.4 = 9.1. Each further case moves exactly
         one term, pinning its weight rather than the sum.
         """
-        self.assertAlmostEqual(setups.fit_turn(self.ev()), 9.3, places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=5)), 9.6,
+        self.assertAlmostEqual(setups.fit_turn(self.ev()), 9.1, places=6)
+        self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=5)), 9.4,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(sma200_rising=False)), 7.8,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(sma200_rising=False)), 7.6,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=1.2)), 9.0,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=1.2)), 8.8,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=-0.1)), 8.9,
+        self.assertAlmostEqual(setups.fit_turn(self.ev(macd_hist=-0.1)), 8.7,
                                places=6)
-        self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=1.30)), 8.9,
-                               places=6)
+        self.assertAlmostEqual(
+            setups.fit_turn(self.ev(ud_ratio=1.30, ud_weighted=1.30,
+                                    ud_20=1.30)), 8.9, places=6)
 
     def test_accumulation_outweighs_volume_expansion(self):
         """Not an accident of the table: the two are both volume terms, and the
@@ -370,8 +384,10 @@ class TestTurnFit(unittest.TestCase):
         """
         w = setups.FIT_WEIGHTS["TURN"]
         self.assertGreater(w["accumulation"], w["vol_expansion"])
-        acc_step = (setups.fit_turn(self.ev(ud_ratio=1.60))
-                    - setups.fit_turn(self.ev(ud_ratio=1.30)))
+        acc_step = (setups.fit_turn(self.ev(ud_ratio=1.60, ud_weighted=1.60,
+                                            ud_20=1.60))
+                    - setups.fit_turn(self.ev(ud_ratio=1.30, ud_weighted=1.30,
+                                              ud_20=1.30)))
         exp_step = (setups.fit_turn(self.ev(vol_expansion=1.35))
                     - setups.fit_turn(self.ev(vol_expansion=1.20)))
         self.assertAlmostEqual(acc_step, 0.4, places=6)
@@ -395,24 +411,24 @@ class TestTurnFit(unittest.TestCase):
         cuts = [(10, 10), (20, 9), (30, 7), (45, 5)]
         for i, (bars, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_turn(self.ev(bars_since_cross=bars)),
-                                   round(0.30 * sub + 6.6, 2), places=6,
+                                   round(0.30 * sub + 6.4, 2), places=6,
                                    msg="at cut %s" % bars)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_turn(self.ev(bars_since_cross=bars + 1)),
-                round(0.30 * above + 6.6, 2), places=6,
+                round(0.30 * above + 6.4, 2), places=6,
                 msg="just above cut %s" % bars)
 
     def test_every_expansion_cut_is_reachable(self):
         cuts = [(1.30, 10), (1.10, 8), (0.0, 5)]
         for i, (mult, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_turn(self.ev(vol_expansion=mult)),
-                                   round(2.7 + 2.5 + 0.15 * sub + 1.0 + 1.6, 2),
+                                   round(2.7 + 2.5 + 0.15 * sub + 1.0 + 1.4, 2),
                                    places=6, msg="at cut %s" % mult)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_turn(self.ev(vol_expansion=mult - 0.001)),
-                round(2.7 + 2.5 + 0.15 * below + 1.0 + 1.6, 2), places=6,
+                round(2.7 + 2.5 + 0.15 * below + 1.0 + 1.4, 2), places=6,
                 msg="just below cut %s" % mult)
 
     def test_every_accumulation_cut_is_reachable(self):
@@ -425,21 +441,26 @@ class TestTurnFit(unittest.TestCase):
         """
         cuts = [(2.50, 10), (2.00, 9), (1.50, 8), (1.25, 6), (1.00, 4)]
         for i, (ud, sub) in enumerate(cuts):
-            self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=ud)),
-                                   round(0.20 * sub + 7.7, 2), places=6,
-                                   msg="at cut %s" % ud)
+            # Both ladders on the same rung and a steady trend, so the term is
+            # exactly that rung and the ladder is seen whole.
+            self.assertAlmostEqual(
+                setups.fit_turn(self.ev(ud_ratio=ud, ud_weighted=ud, ud_20=ud)),
+                round(0.20 * sub + 7.7, 2), places=6, msg="at cut %s" % ud)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 2.0
-            self.assertAlmostEqual(setups.fit_turn(self.ev(ud_ratio=ud - 0.001)),
-                                   round(0.20 * below + 7.7, 2), places=6,
-                                   msg="just below cut %s" % ud)
+            lo = ud - 0.001
+            self.assertAlmostEqual(
+                setups.fit_turn(self.ev(ud_ratio=lo, ud_weighted=lo, ud_20=lo)),
+                round(0.20 * below + 7.7, 2), places=6,
+                msg="just below cut %s" % ud)
 
     def test_fit_stays_inside_zero_to_ten(self):
         best = self.ev(bars_since_cross=0, vol_expansion=5.0, sma200_rising=True,
-                       macd_hist=1.0, ud_ratio=3.0)
+                       macd_hist=1.0, ud_ratio=3.0, ud_weighted=3.0, ud_20=3.0)
         # 0.30*5 + 0.25*4 + 0.15*0 + 0.10*6 + 0.20*2
         #   = 1.5 + 1.0 + 0.0 + 0.6 + 0.4 = 3.5
         worst = self.ev(bars_since_cross=45, vol_expansion=-1.0,
-                        sma200_rising=False, macd_hist=-1.0, ud_ratio=0.5)
+                        sma200_rising=False, macd_hist=-1.0,
+                        ud_ratio=0.5, ud_weighted=0.5, ud_20=0.5)
         self.assertAlmostEqual(setups.fit_turn(best), 10.0, places=6)
         self.assertAlmostEqual(setups.fit_turn(worst), 3.5, places=6)
         self.assertTrue(0.0 <= setups.fit_turn(worst) <= 10.0)
@@ -862,7 +883,7 @@ class TestBuildCtxPassThrough(unittest.TestCase):
         self.assertEqual(set(setups._ctx_from_rows(trend_series(260), {})),
                          {"rows", "rs", "atr_pctile", "sma200_rising",
                           "sma50_rising", "bars_since_cross", "vol_expansion",
-                          "run_pct", "ud_ratio"})
+                          "run_pct", "ud_ratio", "ud_weighted", "ud_20"})
 
 
 class TestBuildCtxPublicEntry(unittest.TestCase):
@@ -1020,6 +1041,78 @@ class TestTurnIsNotGatedOnVolumeExpansion(unittest.TestCase):
         """
         self.assertIsNone(setups.match_turn(result(),
                                             ctx(vol_expansion=3.0, ud_ratio=1.0)))
+
+
+class TestTurnDistributionGate(unittest.TestCase):
+    """The unambiguous case only: BOTH new measures under the floor at once.
+
+    Two independent measurements have to agree that the name is being
+    distributed NOW before it is dropped. Either one alone is a finding the
+    table prints -- a `distribution-into-strength` name still matches -- and
+    only the doubly-confirmed case is excluded.
+    """
+
+    def match(self, **over):
+        strict = over.pop("_strict", False)
+        diag = over.pop("_diag", None)
+        return setups.match_turn(result(), ctx(**over), strict, diag)
+
+    def test_both_measures_below_the_floor_rejects(self):
+        self.assertIsNone(self.match(ud_weighted=0.90, ud_20=0.90))
+
+    def test_the_gate_is_live_in_this_predicate(self):
+        """The paired assertion. Without it, a gate that rejected EVERYTHING
+        would pass the test above and this file would never notice."""
+        self.assertIsNotNone(self.match())
+
+    def test_a_weak_close_weighted_ratio_alone_still_matches(self):
+        """distribution-into-strength: price drifts up, sellers own the close.
+        Surfaced with its label, never dropped."""
+        ev = self.match(ud_ratio=3.74, ud_weighted=0.59, ud_20=1.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_a_weak_twenty_day_ratio_alone_still_matches(self):
+        self.assertIsNotNone(self.match(ud_weighted=1.40, ud_20=0.50))
+
+    def test_the_floor_is_exclusive_on_both_arms(self):
+        """Exactly 1.0 is parity, not distribution. `<=` here would drop a name
+        whose buyers and sellers finished level."""
+        self.assertIsNotNone(self.match(ud_weighted=1.0, ud_20=0.90))
+        self.assertIsNotNone(self.match(ud_weighted=0.90, ud_20=1.0))
+        self.assertIsNone(self.match(ud_weighted=0.999, ud_20=0.999))
+
+    def test_an_unmeasurable_ratio_is_not_read_as_distribution(self):
+        """None means the series could not be judged -- for ud_weighted it means
+        NO bar closed below its own midpoint, the most bullish tape there is.
+        Two measures must both SAY distribution; one that says nothing does
+        not."""
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=0.50))
+        self.assertIsNotNone(self.match(ud_weighted=0.50, ud_20=None))
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=None))
+
+    def test_a_measured_zero_is_read_as_distribution(self):
+        """0.0 is the strongest possible statement of it and must reject through
+        the comparison, not survive as if it were missing."""
+        self.assertIsNone(self.match(ud_weighted=0.0, ud_20=0.0))
+
+    def test_the_strict_arm_of_the_pair_is_the_one_strict_reads(self):
+        """Both halves are 1.0 today, so only a temporarily-tightened pair can
+        show that strict indexes element 1 and loosened element 0."""
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIsNotNone(self.match(ud_weighted=1.2, ud_20=1.2))
+            self.assertIsNone(self.match(ud_weighted=1.2, ud_20=1.2,
+                                         _strict=True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_names_the_condition_a_passing_name_satisfies(self):
+        diag = {}
+        self.match(ud_weighted=0.90, ud_20=0.90, _diag=diag)
+        self.assertEqual(list(diag), [setups._distributing_label(False)])
 
 
 if __name__ == "__main__":

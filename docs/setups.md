@@ -95,6 +95,128 @@ manufacture matches every single day, including days when the honest answer is t
 is under accumulation — and a screen that always returns something is a screen that has
 stopped being evidence.
 
+### The ratio cannot see inside the bar — `ud_weighted`
+
+`ud_ratio` classifies an entire session on one comparison: this close against *yesterday's*
+close. That is the right question only if the close is the whole story of the day, and often
+it is not. A stock can close +0.1% having traded at its low all afternoon, and the ratio books
+the whole day's volume as accumulation. Nothing in the measure can tell that day apart from
+one that closed on its high.
+
+On the live universe the gap is not marginal:
+
+| Symbol | `ud_ratio` | close-weighted |
+|---|---|---|
+| **CONCORDBIO** | 3.74 | **0.59** |
+| **LALPATHLAB** | 2.71 | **0.39** |
+| **HYUNDAI** | 2.86 | **0.63** |
+
+Three names the 50-day ratio calls strong accumulation — and all three are handing their
+closes back.
+
+**`ud_weighted` changes the weighting, not the window.** Same 50 sessions and the same volume,
+but each bar is scored by where it closed *within its own range*, using Chaikin's money-flow
+multiplier:
+
+```
+m = ((Close − Low) − (High − Close)) / (High − Low)
+```
+
+`m` is **+1** when the close is on the high, **−1** on the low and **0** at the midpoint, and
+each bar contributes `volume × m` rather than casting its full volume for whichever side won
+by a rupee. A mid-range close is then recorded as what it was — indecisive — instead of as a
+full day of conviction.
+
+**Two real CONCORDBIO sessions, where the two measures disagree in opposite directions:**
+
+| | 17 Jul | 27 Jul |
+|---|---|---|
+| High / Low / Close | 1352.7 / 1309.2 / 1342.8 | 1275.3 / 1244.5 / 1256.4 |
+| Previous close | 1346.0 | 1248.5 |
+| Settle to settle | **−3.2 — a down day** | **+7.9 — an up day** |
+| Close within its own bar | **77% up** | **39% up** |
+| `ud_ratio` books the day as | selling | buying |
+| `m` | **+0.54** | **−0.23** |
+
+On 17 July the stock was pushed down to 1309 and buyers dragged it back to within ten rupees
+of the high. It settled 3.2 below the previous close, so `ud_ratio` counts the entire day as
+distribution; the weighted reading is +0.54, accumulation. On 27 July it rallied to 1275 and
+gave nearly all of it back, closing 7.9 up on the day — `ud_ratio` counts the whole session
+as buying, while the weighted reading is −0.23, distribution. In both cases the weighted
+number is the one describing what actually happened inside the session.
+
+**Neither ratio replaces the other; the pair is the measure.** Read together they answer two
+different questions — *is price closing higher than it was* and *is it closing strong within
+its own range* — and the interesting cases are the ones where the answers differ:
+
+| | Meaning |
+|---|---|
+| **Both high** | Genuine accumulation — price rising and closing strong |
+| **U/D high, weighted low** | Price drifts up, but sellers control the close. Institutional supply being distributed into strength |
+| **U/D low, weighted high** | Price soft, but buyers defend every dip — often a base forming |
+| **Both low** | Distribution, unambiguously |
+
+"High" and "low" are `ud_ratio` at **1.25** — the same floor LEADER and TURN gate on, so the
+signal and the gates cut the tape in the same place — and `ud_weighted` at **1.0**, which on a
+ratio of two volume buckets is simply parity.
+
+The four readings are emitted as **`volume_signal`**, labelled `accumulation` /
+`distribution-into-strength` / `supported` / `distribution`. A fifth value, `unknown`, means
+there was not enough volume history to classify the name — it is a real finding and prints as
+that word, not as a blank or a neutral middle.
+
+**The second row is why the measure exists.** It is the case the screener previously could not
+see at all: every price condition satisfied, a 50-day up/down ratio in the top decile, and
+supply being fed into the advance one strong-looking close at a time. CONCORDBIO, LALPATHLAB
+and HYUNDAI above are all that row. On the old measure they were the best-looking names on the
+list.
+
+### 50 sessions, all weighted equally — `ud_20` and `accumulation_trend`
+
+The second blind spot is chronological. A 50-bar window treats a bar from ten weeks ago
+exactly like yesterday's, so a stock that was accumulated hard for 40 sessions and has been
+distributed for the last 10 scores identically to one being accumulated right now. The number
+is accurate and out of date at the same time.
+
+**`ud_20` is the same ratio over 20 bars**, and comparing it against the 50-day gives
+**`accumulation_trend`** — whether the buying is still going on or is something that already
+happened. Live examples:
+
+| Symbol | 50-day | 20-day | Reading |
+|---|---|---|---|
+| **VIJAYA** | 1.70 | 0.52 | `reversed` — accumulation stopped and turned |
+| **CONCORDBIO** | 3.74 | 1.18 | `fading` |
+| **BHARATFORG** | 2.05 | 1.06 | `fading` |
+
+The label is read off the 20-day as a **fraction of the 50-day**: above **1.30** is
+`strengthening`, the near window carrying the number; **0.90–1.30** is `steady`, a band that
+wide because the 20 bars *are* 20 of the 50 and two overlapping windows of the same tape can
+never be independent; **0.70–0.90** is `flattening`; below **0.70** is `fading`. `reversed` is
+tested first and is the strictly stronger statement: the same sub-0.70 drop, plus a 20-day
+ratio that has crossed **below 1.0** outright — not merely less accumulation, but distribution.
+`unknown` means one of the two ratios could not be measured. VIJAYA is the clearest case: a perfectly respectable 1.70 on the window the gates read, and a recent month
+in which more volume has moved it down than up. The 50-day number is not wrong — it is a fair
+description of a period that has ended.
+
+### How the two measures are used
+
+**As a gate, deliberately conservative.** A setup fails only when `ud_weighted < 1.0` **and**
+`ud_20 < 1.0` — the close-weighted reading and the recent window both saying the stock is
+being distributed *now*. Either one alone is a caution, not a finding: a weighted ratio below
+1.0 on its own can be a month of thin, mid-range drift, and a soft 20-day on its own can be a
+normal pause inside a healthy trend. Two independent measurements agreeing is a different
+class of evidence from one, and only that case is excluded. A `distribution-into-strength`
+name therefore still matches and is still reported — with its label attached, so the reader
+weighs it. Hiding it would trade one blind spot for another.
+
+**As a ranking input.** Both feed the shared **accumulation** component of Setup Fit, so they
+order the list as well as filter it — a name closing strong sits above one closing weak even
+when both cleared the gate.
+
+**In the output.** Three terminal columns — `Up/Down Volume Ratio`, `Volume Signal` and
+`Accumulation Trend` — and five CSV columns: `ud_ratio`, `ud_weighted`, `ud_20`,
+`volume_signal` and `accumulation_trend`.
+
 ---
 
 ## COILED — volatility contracting inside a base
@@ -478,8 +600,9 @@ Fit answers "how textbook is this instance of *this* setup" — base tightness a
 COILED, volume multiple and freshness for BREAKOUT. **An 8 for COILED and an 8 for PULLBACK
 are different measurements.** Never compare Fit across tables.
 
-All five formulas now share one **accumulation** term, scored from the up/down volume ratio
-on a single band (≥2.50 → 10 · 2.00–2.50 → 9 · 1.50–2.00 → 8 · 1.25–1.50 → 6 · 1.00–1.25 →
+All five formulas now share one **accumulation** term, fed by the up/down volume ratio and by
+the two measures that qualify it — `ud_weighted` and `ud_20` — and scored from the ratio on a
+single band (≥2.50 → 10 · 2.00–2.50 → 9 · 1.50–2.00 → 8 · 1.25–1.50 → 6 · 1.00–1.25 →
 4 · below 1.00 → 2), so that "accumulation" means the same thing in every table even though
 the Fit it feeds does not. An unmeasurable ratio scores the same floor as a distributing
 one: a score that rewarded the *absence* of evidence would rank an unmeasured name above a
@@ -506,7 +629,7 @@ a good chart you cannot buy today is information.
 ### The Up/Down Volume Ratio column
 
 Every table carries `Up/Down Volume Ratio`, CONFLUENCE included, and the CSV carries it as
-`ud_ratio` immediately after `rs_3m` — taking the file from 26 columns to 27. It is a
+`ud_ratio` immediately after `rs_3m`. It is a
 **base column, not evidence**: like Risk:Reward and relative strength it is one number
 meaning one thing for every name, rather than one of the two setup-specific facts each
 table reports.
@@ -532,6 +655,29 @@ neither buyable nor repaired by its trigger).
 
 These reuse `watchlist_analyser`'s vocabulary so the two skills stay mutually legible.
 **A `BUY NOW` means "passes the mechanical gate at a neutral catalyst" — not "buy this".**
+
+### `Volume Signal` and `Accumulation Trend` sit beside it
+
+The ratio no longer travels alone. Two further base columns qualify it on every table:
+**`Volume Signal`** — `accumulation` / `distribution-into-strength` / `supported` /
+`distribution`, the four-way reading of the raw ratio against the close-weighted one — and
+**`Accumulation Trend`**, the 20-day ratio against the 50-day as `strengthening` / `steady` /
+`flattening` / `fading` / `reversed`. Either can read `unknown`, which means the history was
+too short to classify — a stated finding, distinct from the `-` a cell prints when its
+producer had nothing to say at all.
+
+They are there because a single ratio can be true and misleading at once. A 3.74 with a
+`distribution-into-strength` signal and a `fading` trend is not the same row as a 3.74
+without them, and before these columns existed the two were indistinguishable on screen.
+
+**`distribution-into-strength` is the label to stop on.** It means the price chart and the
+volume disagree while the price chart still looks strong — the same disagreement a sub-1.0
+ratio makes obvious, wearing a good number instead. The name still matched its setup; it has
+earned a closer look, not a position.
+
+In the CSV the same information arrives as five columns rather than three, because the file
+keeps the numbers the labels were derived from: `ud_ratio`, `ud_weighted`, `ud_20`,
+`volume_signal`, `accumulation_trend`. That takes it **from 27 columns to 31**.
 
 ### Scores are catalyst-neutral
 

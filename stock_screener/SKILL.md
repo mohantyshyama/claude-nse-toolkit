@@ -80,6 +80,11 @@ it retraces (0.75 strict). TURN is deliberately **not** gated on volume expansio
 golden cross — that measure decays with the age of the cross, so it would penalise an older
 cross rather than weak demand. If asked why, say so; it looks like an omission otherwise.
 
+**One volume gate is shared by all of them**: a setup fails when the close-weighted ratio
+(`ud_weighted`) and the 20-day ratio (`ud_20`) are both below 1.0 — two independent measures
+agreeing the stock is being distributed *now*. Names failing only one still match, and are
+reported with their `Volume Signal` label.
+
 **PULLBACK waits for the turn, not just the dip.** A match is a name at least 3% below a
 recent swing high (5% strict) whose last bar — or the one before it — reached a support
 level, closed back above that same level, and closed in the top half of its own range
@@ -91,8 +96,8 @@ gate working, not a thin tape.
 
 1. **Scan header** — date, universe, counts, FAILED list, per-setup match counts.
 2. **One table per chosen setup**, ranked. Full-word column headers, always including
-   `Sector`, `Score Now (catalyst-neutral)` and `Up/Down Volume Ratio`. Include
-   `showing top N of M` whenever the list was truncated.
+   `Sector`, `Score Now (catalyst-neutral)`, `Up/Down Volume Ratio`, `Volume Signal` and
+   `Accumulation Trend`. Include `showing top N of M` whenever the list was truncated.
 3. **The key**, after every table. Never drop it — a narrower table is harder to read,
    not faster.
 4. **Breadth read** — two or three sentences on what the match counts and sector
@@ -132,15 +137,29 @@ python3 <skill-dir>/screener.py --setup all --csv log.csv --append   # keep a hi
   one table. `--json` and `--csv` are independent and may be used together; the "wrote N
   rows" notice goes to stderr so JSON on stdout stays parseable.
 
-The 27 columns, in order: `scan_date`, `last_closed_bar`, `universe`, `mode`, `symbol`,
+The 31 columns, in order: `scan_date`, `last_closed_bar`, `universe`, `mode`, `symbol`,
 `sector`, `setup`, `rank`, `setup_fit`, `score_now`, `score_at_trigger`, `risk_reward`,
 `vetoed`, `action`, `price`, `trigger_price`, `stop`, `rs_1m`, `rs_3m`, `ud_ratio`,
+`ud_weighted`, `ud_20`, `volume_signal`, `accumulation_trend`,
 `setups_matched`, `match_count`, `evidence_1_label`, `evidence_1_value`,
 `evidence_2_label`, `evidence_2_value`, `flags`.
 
 `ud_ratio` is the up/down volume ratio, on every row including CONFLUENCE — a per-symbol
 metric like `rs_3m`, not an evidence slot, so it sits with them rather than in the
 setup-specific pair. An unmeasurable ratio is an empty cell, never a `1.00`.
+
+The four columns beside it qualify it, and are per-symbol in the same way. `ud_weighted` is
+the same 50 sessions with each bar weighted by where it closed *inside its own range*
+(Chaikin's money-flow multiplier: +1 at the high, −1 at the low, 0 at the midpoint) rather
+than against yesterday's close. `ud_20` is the plain ratio over 20 bars. `volume_signal` is
+the four-way reading of `ud_ratio` against `ud_weighted`, cut at 1.25 and 1.0 —
+`accumulation` / `distribution-into-strength` / `supported` / `distribution` — and
+`accumulation_trend` is `ud_20` as a fraction of `ud_ratio`: `strengthening` above 1.30,
+`steady` 0.90–1.30, `flattening` 0.70–0.90, `fading` below 0.70, and `reversed` when that
+same drop also puts `ud_20` below 1.0 outright.
+Either label reads `unknown` when there was too little volume history to classify the name —
+a stated finding, and written out as that word rather than left blank. The numbers are kept
+alongside the labels so the file carries the inputs, not only the verdict.
 
 `mode` records `strict` or `loosened`, so two files from different threshold settings can
 never be silently concatenated as one scan.
@@ -175,6 +194,21 @@ the key, the FAILED list, or the breadth read.
   not test, so call it out in the write-up rather than letting the row pass unremarked. It
   is not automatically disqualifying: a coil is meant to be quiet and a pullback is meant
   to be sold. A `-` means the ratio could not be measured; it is not a 1.00.
+- **A `distribution-into-strength` label means the price and the volume disagree, and the
+  name needs a closer look before anyone acts on it.** The up/down ratio is high — price is
+  closing above yesterday session after session — while the close-weighted ratio is low, so
+  sellers are taking the close each day. That is supply being distributed into strength, and
+  it wears a good-looking number: on the raw ratio alone these are the best rows on the page.
+  The name still matched its setup and is reported normally; say what the label means rather
+  than letting a strong `Up/Down Volume Ratio` speak for the row unchallenged. `supported` is
+  the mirror case and reads the other way — a soft ratio with buyers defending every dip,
+  often a base forming. Pair both with `Accumulation Trend`: a `fading` or `reversed` trend
+  says whatever the 50-day number describes has already stopped.
+- **The volume gate takes two negative readings, not one.** A setup fails only when the
+  close-weighted ratio and the 20-day ratio are *both* below 1.0. This is deliberately
+  conservative: one measure reading negative is a caution and gets surfaced with its label,
+  two independent measures agreeing is a finding and gets excluded. Do not describe a single
+  sub-1.0 reading as a failed gate.
 - **An empty screen in a falling market may be the threshold, not the market.** The volume
   floors are absolute numbers rather than percentiles of the day's universe, so in a broad
   selloff they can reject nearly everything. If the rejection funnel shows most names dying
@@ -200,4 +234,6 @@ the key, the FAILED list, or the breadth read.
 | Appending scans with different `--strict` settings and reading them as one | The `mode` column is there to keep them apart |
 | Reporting a sub-1.0 `Up/Down Volume Ratio` without comment | The price chart and the volume disagree, and only the reader can weigh that |
 | Reading a `-` in the ratio column as a neutral 1.00 | It means the ratio could not be measured at all |
+| Reporting a `distribution-into-strength` row on its strong `Up/Down Volume Ratio` alone | Price and volume disagree; the label is the reason to look closer |
+| Calling a name distributing off one sub-1.0 reading | The gate needs both measures; one is a caution, not a finding |
 | Calling an empty selloff screen "no setups exist" | The absolute volume floors may simply no longer suit the regime |

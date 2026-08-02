@@ -214,21 +214,33 @@ class _ProjStub:
 
 
 # Sentinel for "build the matched entry the way a producer that never learnt
-# about the ratio would" -- the key absent altogether, which is NOT the same
+# about the field would" -- the key absent altogether, which is NOT the same
 # fixture as the key present and None.
 OMITTED = object()
+
+# The five volume fields evaluate() puts at the top level of every matched
+# entry. Every default is DISTINCT from every other, and distinct from every
+# other number the fixture carries: build_result_row wiring `ud_weighted` to
+# `ud_ratio`'s value, or the two labels to each other, is invisible against a
+# fixture that repeats one value across the block.
+VOLUME_FIELDS = ("ud_ratio", "ud_weighted", "ud_20",
+                 "volume_signal", "accumulation_trend")
 
 
 def scanned(verdict="WATCHLIST - WAIT FOR TRIGGER", rr=2.4, atr=10.0,
             evidence=None, price=200.0, total=6.2, fit=8.1,
-            rs=None, sector="Information Technology", ud_ratio=1.47):
+            rs=None, sector="Information Technology", ud_ratio=1.47,
+            ud_weighted=0.63, ud_20=2.85, volume_signal="accumulation",
+            accumulation_trend="strengthening"):
     """One scan() row. The matched entry follows setups.evaluate's contract:
-    `ud_ratio` sits at the TOP LEVEL beside `fit` and `evidence`, which is what
-    build_result_row reads, so the fixture is built here rather than borrowed
-    from setups.py."""
+    the five volume fields sit at the TOP LEVEL beside `fit` and `evidence`,
+    which is what build_result_row reads, so the fixture is built here rather
+    than borrowed from setups.py."""
     hit = {"fit": fit, "evidence": {} if evidence is None else evidence}
-    if ud_ratio is not OMITTED:
-        hit["ud_ratio"] = ud_ratio
+    for key, value in zip(VOLUME_FIELDS, (ud_ratio, ud_weighted, ud_20,
+                                          volume_signal, accumulation_trend)):
+        if value is not OMITTED:
+            hit[key] = value
     return {"symbol": "TCS", "sector": sector,
             "rs": rs if rs is not None else {"1m": 3.0, "3m": 11.0},
             "matched": {"LEADER": hit},
@@ -330,6 +342,119 @@ class TestBuildResultRow(unittest.TestCase):
                     scanned(ud_ratio=OMITTED, evidence={"ud_ratio": 1.47}),
                     "LEADER")
 
+    def test_every_volume_field_is_lifted_off_the_matched_entry(self):
+        """Five fields, five values that collide with nothing else on the row.
+
+        A row is what the table and the CSV both render, so this wiring is the
+        whole of the reporting change. The values are chosen so that reading
+        ANY of the five from the wrong key produces a visibly wrong answer
+        rather than a plausible one.
+        """
+        with _ProjStub(None):
+            r = screener.build_result_row(
+                scanned(ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+                        volume_signal="distribution-into-strength",
+                        accumulation_trend="fading"), "LEADER")
+        self.assertAlmostEqual(r["ud_ratio"], 1.47, places=6)
+        self.assertAlmostEqual(r["ud_weighted"], 0.63, places=6)
+        self.assertAlmostEqual(r["ud_20"], 2.85, places=6)
+        self.assertEqual(r["volume_signal"], "distribution-into-strength")
+        self.assertEqual(r["accumulation_trend"], "fading")
+
+    def test_the_weighted_ratio_is_not_the_plain_one(self):
+        """The pair a copy-paste most easily crosses. They disagree on purpose
+        here: the close-weighted ratio is BELOW 1.0 while the plain ratio is
+        well above it, which is exactly the tape the weighting exists to
+        expose -- volume arriving on up-days that close at their lows."""
+        with _ProjStub(None):
+            r = screener.build_result_row(
+                scanned(ud_ratio=1.90, ud_weighted=0.71), "LEADER")
+        self.assertAlmostEqual(r["ud_ratio"], 1.90, places=6)
+        self.assertAlmostEqual(r["ud_weighted"], 0.71, places=6)
+        self.assertNotAlmostEqual(r["ud_weighted"], r["ud_ratio"], places=6)
+
+    def test_the_twenty_bar_ratio_is_not_the_fifty_bar_one(self):
+        """The other crossable pair. 20 bars and 50 bars are different windows
+        over the same name and routinely disagree -- that disagreement is the
+        entire content of accumulation_trend."""
+        with _ProjStub(None):
+            r = screener.build_result_row(
+                scanned(ud_ratio=1.10, ud_20=2.40), "LEADER")
+        self.assertAlmostEqual(r["ud_ratio"], 1.10, places=6)
+        self.assertAlmostEqual(r["ud_20"], 2.40, places=6)
+
+    def test_the_two_labels_are_not_swapped(self):
+        """They are both plain strings from adjacent keys, so a transposition
+        type-checks and renders. The values here come from disjoint vocabularies
+        -- no signal is ever `steady`, no trend is ever `supported` -- so a swap
+        cannot look like a plausible row."""
+        with _ProjStub(None):
+            r = screener.build_result_row(
+                scanned(volume_signal="supported",
+                        accumulation_trend="reversed"), "LEADER")
+        self.assertEqual(r["volume_signal"], "supported")
+        self.assertEqual(r["accumulation_trend"], "reversed")
+
+    def test_each_label_carries_its_own_value_across_the_vocabulary(self):
+        """Every documented label survives the trip verbatim, not just the one
+        the fixture defaults to. A row that hard-coded `accumulation` would pass
+        the default fixture and nothing else."""
+        signals = ("accumulation", "distribution-into-strength", "supported",
+                   "distribution", "unknown")
+        trends = ("strengthening", "steady", "flattening", "fading",
+                  "reversed", "unknown")
+        for signal in signals:
+            with self.subTest(volume_signal=signal), _ProjStub(None):
+                r = screener.build_result_row(
+                    scanned(volume_signal=signal), "LEADER")
+                self.assertEqual(r["volume_signal"], signal)
+        for trend in trends:
+            with self.subTest(accumulation_trend=trend), _ProjStub(None):
+                r = screener.build_result_row(
+                    scanned(accumulation_trend=trend), "LEADER")
+                self.assertEqual(r["accumulation_trend"], trend)
+
+    def test_an_unmeasurable_volume_field_stays_none_on_the_row(self):
+        """One field at a time, so the assertion cannot be satisfied by a row
+        that blanked the whole block. `or "unknown"` on a label would be the
+        same lie `or 1.0` is on a ratio: "unknown" is a real classification."""
+        for key in VOLUME_FIELDS:
+            with self.subTest(field=key), _ProjStub(None):
+                r = screener.build_result_row(scanned(**{key: None}), "LEADER")
+                self.assertIsNone(r[key])
+                for other in VOLUME_FIELDS:
+                    if other != key:
+                        self.assertIsNotNone(r[other], other)
+
+    def test_a_measured_zero_ratio_stays_zero_on_the_row(self):
+        """The value `or None` and `or 1.0` both swallow. 0.0 on the weighted
+        ratio is a name whose every up-bar closed at its low."""
+        for key in ("ud_ratio", "ud_weighted", "ud_20"):
+            with self.subTest(field=key), _ProjStub(None):
+                r = screener.build_result_row(scanned(**{key: 0.0}), "LEADER")
+                self.assertEqual(r[key], 0.0)
+
+    def test_a_matched_entry_missing_any_volume_field_raises(self):
+        """One missing key at a time. A `.get` default on any of the five would
+        pass silently for that field and print a dash -- or, worse on a label,
+        the real word `unknown` -- in every row of every table."""
+        for key in VOLUME_FIELDS:
+            with self.subTest(field=key), _ProjStub(None):
+                with self.assertRaises(KeyError):
+                    screener.build_result_row(scanned(**{key: OMITTED}),
+                                              "LEADER")
+
+    def test_the_evidence_slot_alone_does_not_satisfy_any_volume_field(self):
+        """A predicate that carries these in its evidence has not been migrated,
+        and reading them from there would hide that from CONFLUENCE, whose two
+        evidence slots are already the matched label and the mean fit."""
+        for key in VOLUME_FIELDS:
+            with self.subTest(field=key), _ProjStub(None):
+                with self.assertRaises(KeyError):
+                    screener.build_result_row(
+                        scanned(**{key: OMITTED, "evidence": {key: "x"}}),
+                        "LEADER")
+
     def test_ratio_below_one_point_five_is_vetoed(self):
         with _ProjStub(None):
             r = screener.build_result_row(scanned(rr=1.49), "LEADER")
@@ -378,12 +503,21 @@ class TestBuildResultRow(unittest.TestCase):
         rendered. The two entries carry different ratios here only to prove
         which one is read -- in a real scan they are the same number, because
         evaluate() copies it from one per-symbol context."""
-        row = scanned(fit=8.1, ud_ratio=1.47)
-        row["matched"]["COILED"] = {"fit": 2.2, "evidence": {}, "ud_ratio": 2.22}
+        row = scanned(fit=8.1, ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+                      volume_signal="accumulation",
+                      accumulation_trend="strengthening")
+        row["matched"]["COILED"] = {"fit": 2.2, "evidence": {}, "ud_ratio": 2.22,
+                                    "ud_weighted": 3.33, "ud_20": 4.44,
+                                    "volume_signal": "distribution",
+                                    "accumulation_trend": "reversed"}
         with _ProjStub(None):
             built = screener.build_result_row(row, "COILED")
         self.assertAlmostEqual(built["fit"], 2.2)
         self.assertAlmostEqual(built["ud_ratio"], 2.22, places=6)
+        self.assertAlmostEqual(built["ud_weighted"], 3.33, places=6)
+        self.assertAlmostEqual(built["ud_20"], 4.44, places=6)
+        self.assertEqual(built["volume_signal"], "distribution")
+        self.assertEqual(built["accumulation_trend"], "reversed")
 
 
 class TestRankingEdges(unittest.TestCase):

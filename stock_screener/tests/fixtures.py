@@ -129,6 +129,47 @@ def ud_series(pattern, price=100.0, step=1.0, up_vol=2_000_000,
     return rows
 
 
+CMF_VOLS = (1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000)
+
+
+def cmf_series(positions, price=100.0, span=2.0, vols=None, spans=None):
+    """Bars whose CLOSE POSITION INSIDE ITS OWN RANGE is set per bar.
+
+    `positions[i]` is where bar i closes between its own low (0.0) and its own
+    high (1.0), so the Chaikin multiplier for that bar is exactly `2p - 1`:
+    1.0 -> +1, 0.5 -> 0, 0.0 -> -1.
+
+    THREE blind spots this exists to close, all of them present in every other
+    fixture in this file:
+
+    * flat_series, trend_series and contracting_series close every bar on its
+      own MIDPOINT, so every multiplier is 0, both buckets are empty and
+      ud_weighted returns None whatever the implementation does.
+    * close_at_high_series closes every bar at its high, so every multiplier is
+      +1 and the down bucket is empty -- again None, and a swapped numerator and
+      denominator is invisible.
+    * a series where every close sits at the SAME relative position gives every
+      bar the same multiplier, so the ratio collapses to a volume total and a
+      sign-flipped multiplier merely inverts it.
+
+    Volumes default to five DISTINCT values cycling, so a bar credited to the
+    wrong bucket moves the answer rather than cancelling out, and `up/down`
+    cannot be confused with `down/up`.
+
+    `spans` overrides the intraday half-range per bar. A 0 entry builds a
+    genuine ZERO-RANGE bar (h == l == c), which is the division ud_weighted has
+    to guard.
+    """
+    v = CMF_VOLS if vols is None else vols
+    rows = []
+    for i, p in enumerate(positions):
+        s = span if spans is None else spans[i]
+        hi, lo = price + s, price - s
+        c = lo + (hi - lo) * p if s else price
+        rows.append(bar(i, price, hi, lo, c, v[i % len(v)]))
+    return rows
+
+
 def gapped_tr_series(n=40, start=100.0, vol=1_000_000):
     """Bars whose true range varies bar to bar AND that gap in both directions.
 

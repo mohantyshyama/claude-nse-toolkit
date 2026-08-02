@@ -28,7 +28,8 @@ COLUMNS = ["scan_date", "last_closed_bar", "universe", "mode",
            "setup", "rank", "setup_fit",
            "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
            "price", "trigger_price", "stop",
-           "rs_1m", "rs_3m", "ud_ratio",
+           "rs_1m", "rs_3m", "ud_ratio", "ud_weighted", "ud_20",
+           "volume_signal", "accumulation_trend",
            "setups_matched", "match_count",
            "evidence_1_label", "evidence_1_value",
            "evidence_2_label", "evidence_2_value",
@@ -73,7 +74,8 @@ EVIDENCE = {
 SCORE_PLACES = 2
 RS_PLACES = 1
 EVIDENCE_PLACES = 3
-# The up/down volume ratio is published to the SAME two places the terminal
+# All three up/down volume ratios -- the 50-bar ratio, its close-weighted twin
+# and the 20-bar ratio -- are published to the SAME two places the terminal
 # column prints, and deliberately not to EVIDENCE_PLACES: it is not evidence
 # living in 0..1 where the third decimal separates two names, it is a ratio
 # around 1.0 built from 50 bars of volume, and 1.472 vs 1.473 is noise the
@@ -131,6 +133,22 @@ def num(v, places=SCORE_PLACES):
     if v != v:                              # nan: unmeasurable, same as None
         return ""
     return round(v, places)
+
+
+def text(v):
+    """A label cell: the label verbatim, and an empty cell for no label.
+
+    The same contract num() keeps for numbers, for the columns whose values are
+    words. `str(v)` alone would write the four characters "None" into
+    volume_signal, which sorts and filters as though it were a label of its own
+    and reads, to anyone opening the file, like a fifth signal the key never
+    defines. An empty cell is the honest form of "no value here".
+
+    Note this is NOT the same case as the "unknown" label: "unknown" is a real
+    finding -- too little volume history to classify the name -- and arrives as
+    that word, so it is written out as that word.
+    """
+    return "" if v is None else str(v)
 
 
 # The two date COLUMNS. `02-Aug-2026`, never `2026-08-02`.
@@ -276,6 +294,14 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
                 # would write an empty cell for the whole file and read as "the
                 # market has no volume data" instead of raising.
                 "ud_ratio": num(r["ud_ratio"], UD_PLACES),
+                # The same block, in the order a reader works through it: the
+                # two remaining raw ratios first, at ud_ratio's own two places
+                # for the same reason, then the two labels derived from them.
+                # Subscript throughout, for the reason above.
+                "ud_weighted": num(r["ud_weighted"], UD_PLACES),
+                "ud_20": num(r["ud_20"], UD_PLACES),
+                "volume_signal": text(r["volume_signal"]),
+                "accumulation_trend": text(r["accumulation_trend"]),
                 "setups_matched": "|".join(matched),
                 "match_count": len(matched),
                 "evidence_1_label": e1_label,

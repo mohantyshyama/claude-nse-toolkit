@@ -141,15 +141,20 @@ FULL_EVIDENCE = {"pct_from_high": 3.1, "contraction": 0.55, "pos_in_base": 0.82,
 
 def scan_row(sym, sector="Information Technology", matched=("LEADER",),
              verdict="HALF SIZE", rr=2.0, total=6.5, price=100.0,
-             illiquid=False, ud_ratio=1.47):
-    """A scan() row. Each matched entry carries `ud_ratio` at the top level
-    beside `fit` and `evidence`, which is setups.evaluate's contract and what
-    build_result_row reads -- the report cannot be rendered from an entry
-    without it."""
+             illiquid=False, ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+             volume_signal="accumulation",
+             accumulation_trend="strengthening"):
+    """A scan() row. Each matched entry carries the five volume fields at the
+    top level beside `fit` and `evidence`, which is setups.evaluate's contract
+    and what build_result_row reads -- the report cannot be rendered from an
+    entry without them. The defaults are all distinct from one another so a
+    report column reading a neighbouring field shows a wrong value."""
     return {"symbol": sym, "sector": sector, "rs": {"1m": 1.0, "3m": 2.0},
             "illiquid": illiquid,
             "matched": {n: {"fit": 8.0, "evidence": dict(FULL_EVIDENCE),
-                            "ud_ratio": ud_ratio}
+                            "ud_ratio": ud_ratio, "ud_weighted": ud_weighted,
+                            "ud_20": ud_20, "volume_signal": volume_signal,
+                            "accumulation_trend": accumulation_trend}
                         for n in matched},
             "o": {"price": price, "score": {"total": total, "verdict": verdict},
                   "entry_gate": {"rr_at_current_price": rr},
@@ -523,6 +528,46 @@ class TestMainReport(unittest.TestCase):
         self.assertIn("leaders", out)
         self.assertIn("Mechanical framework output, not personalised "
                       "investment advice.", out)
+
+    def test_the_report_carries_the_three_volume_columns_and_their_values(self):
+        """End to end through main(): the scan row's volume fields survive
+        build_result_row, rank() and render_table into the printed table, and
+        the key under it defines every one of them.
+
+        The values are distinct from one another and from every other number in
+        the fixture, so a column wired to a neighbouring field prints something
+        the assertions below do not accept.
+        """
+        stub = _MainStub(rows=[scan_row("TCS", ud_ratio=1.47, ud_weighted=0.63,
+                                        ud_20=2.85,
+                                        volume_signal="distribution-into-strength",
+                                        accumulation_trend="fading")])
+        _, out = run_main(["--setup", "leader"], stub)
+        header_line = [l for l in out.splitlines() if l.startswith("| Rank |")][0]
+        headers = [c.strip() for c in header_line.strip("|").split("|")]
+        data_line = [l for l in out.splitlines() if "| TCS |" in l][0]
+        cells = [c.strip() for c in data_line.strip("|").split("|")]
+        row = dict(zip(headers, cells))
+        self.assertEqual(row["Up/Down Volume Ratio"], "1.47")
+        self.assertEqual(row["Volume Signal"], "distribution-into-strength")
+        self.assertEqual(row["Accumulation Trend"], "fading")
+        # The two CSV-only ratios are not silently printed as extra columns.
+        self.assertNotIn("0.63", cells)
+        self.assertNotIn("2.85", cells)
+        self.assertIn("distribution-into-strength", out)
+        self.assertIn("sellers control", out)
+
+    def test_every_setup_table_in_one_report_carries_the_volume_columns(self):
+        """Including CONFLUENCE, which reaches the report by a different path --
+        it is synthesised from the others rather than matched by a predicate."""
+        stub = _MainStub(rows=[scan_row("TCS", matched=("LEADER", "TURN",
+                                                        "CONFLUENCE"))])
+        _, out = run_main(["--setup", "all"], stub)
+        tables = [l for l in out.splitlines() if l.startswith("| Rank |")]
+        self.assertEqual(len(tables), 3)
+        for line in tables:
+            self.assertIn("Volume Signal", line)
+            self.assertIn("Accumulation Trend", line)
 
     def test_a_clamped_top_is_announced(self):
         rc, out = run_main(["--setup", "leader", "--top", "21"], _MainStub())

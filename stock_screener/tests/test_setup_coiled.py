@@ -65,7 +65,13 @@ def ctx(**over):
     c = {"rows": contracting_series([4.0, 2.5, 1.0], price=105.0, bars_per_window=8),
          "rs": {"1m": 1.0, "3m": 5.0},
          "atr_pctile": 0.20, "sma200_rising": True, "sma50_rising": True,
-         "ud_ratio": 1.60}
+         # ud_weighted 1.30 and ud_20 1.55 alongside it: three DIFFERENT
+         # numbers, so a fit term reading the wrong key, or a gate reading the
+         # 50-bar ratio where it means the 20-bar one, changes the answer. Both
+         # clear the 1.0 distribution floor, and 1.55/1.60 bands "steady", so
+         # every pre-existing case here still turns on the condition it was
+         # written for rather than on a trend penalty.
+         "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
     c.update(over)
     return c
 
@@ -269,35 +275,67 @@ class TestCoiledMatches(unittest.TestCase):
     def test_fit_weights_are_thirty_five_twenty_five_twenty_twenty(self):
         """Pins the absolute score, not just the ordering.
 
-        contraction 0.25 -> 10, position 0.80 -> 8, dry-up 0.75 -> 8,
-        accumulation 1.60 -> 8, so
-        0.35*10 + 0.25*8 + 0.20*8 + 0.20*8 = 3.5 + 2.0 + 1.6 + 1.6 = 8.7.
+        contraction 0.25 -> 10, position 0.80 -> 8, dry-up 0.75 -> 8, and
+        accumulation 7.0 -- the fixture's 1.60 close-to-close bands to 8, its
+        1.30 close-weighted ratio to 6, the two share the term equally, and
+        1.55/1.60 bands "steady" so nothing is deducted. So
+        0.35*10 + 0.25*8 + 0.20*8 + 0.20*7 = 3.5 + 2.0 + 1.6 + 1.4 = 8.5.
         Any other weighting that preserves the ordering above -- equal quarters,
-        for instance, which gives 8.5 -- lands elsewhere.
+        for instance, which gives 8.25 -- lands elsewhere.
         """
         self.assertAlmostEqual(setups.fit_coiled(setups.match_coiled(result(), ctx())),
-                               8.7, places=6)
+                               8.5, places=6)
 
     def test_the_accumulation_term_is_exactly_a_fifth_of_the_score(self):
-        """The new term, isolated. Moving the ratio from the 1.50 rung (8) to
-        the sub-1.00 rung (2) must move the total by 0.20 * 6 = 1.2 and nothing
-        else -- every other input is held.
+        """The term, isolated, with both ratios moved together so the whole
+        0-10 range of it is exercised: from the 1.50 rung (8) to the sub-1.00
+        rung (2) must move the total by 0.20 * 6 = 1.2 and nothing else.
+
+        The weak case holds ud_20 at exactly 1.0 rather than dropping it with
+        the others, because a close-weighted ratio and a 20-bar ratio BOTH under
+        1.0 is the distribution gate's own condition and the predicate would
+        return None instead of a low score.
 
         Without this the 20% weight is pinned only by the sum above, which any
         redistribution among four terms could reproduce.
         """
-        strong = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=1.60)))
-        weak = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=0.80)))
+        strong = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=1.60, ud_weighted=1.60, ud_20=1.60)))
+        weak = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=0.80, ud_weighted=0.80, ud_20=1.0)))
         self.assertAlmostEqual(strong - weak, 1.2, places=6)
         self.assertAlmostEqual(weak, 7.5, places=6)
+
+    def test_the_close_weighted_ratio_carries_half_the_term(self):
+        """A name closing strong and one being sold into every close cannot
+        score the same. Only ud_weighted moves: 8 -> 2 on half the term is
+        0.20 * 0.5 * 6 = 0.6."""
+        strong = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=1.60, ud_weighted=1.60, ud_20=1.55)))
+        sold = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=1.60, ud_weighted=0.59, ud_20=1.55)))
+        self.assertAlmostEqual(strong - sold, 0.6, places=6)
+
+    def test_a_reversed_accumulation_trend_is_deducted(self):
+        """Same two ratios, different 20-bar window: 2.0 ladder points off a
+        reversed trend is 0.20 * 2.0 = 0.4 of the score."""
+        steady = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=1.60, ud_weighted=1.60, ud_20=1.55)))
+        reversed_ = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=1.60, ud_weighted=1.60, ud_20=0.50)))
+        self.assertEqual(setups.accumulation_trend(1.60, 0.50),
+                         setups.TREND_REVERSED)
+        self.assertAlmostEqual(steady - reversed_, 0.4, places=6)
 
     def test_an_unmeasurable_ratio_scores_the_floor_not_the_top(self):
         """COILED does NOT gate on the up/down ratio, so a None reaches its fit.
         It must score the 2.0 floor -- identical to a distributing name, and 6
         sub-score points below the fixture -- rather than being rewarded for the
         absence of evidence."""
-        none_ = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=None)))
-        weak = setups.fit_coiled(setups.match_coiled(result(), ctx(ud_ratio=0.80)))
+        none_ = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=None, ud_weighted=None, ud_20=None)))
+        weak = setups.fit_coiled(setups.match_coiled(
+            result(), ctx(ud_ratio=0.80, ud_weighted=0.80, ud_20=1.0)))
         self.assertAlmostEqual(none_, weak, places=6)
         self.assertAlmostEqual(none_, 7.5, places=6)
 
@@ -958,6 +996,78 @@ class TestCoiledUpThrustLookback(unittest.TestCase):
         import inspect
         window = inspect.signature(A.detect_thrusts).parameters["window"].default
         self.assertLessEqual(window, setups.UP_THRUST_BARS)
+
+
+class TestCoiledDistributionGate(unittest.TestCase):
+    """The unambiguous case only: BOTH new measures under the floor at once.
+
+    Two independent measurements have to agree that the name is being
+    distributed NOW before it is dropped. Either one alone is a finding the
+    table prints -- a `distribution-into-strength` name still matches -- and
+    only the doubly-confirmed case is excluded.
+    """
+
+    def match(self, **over):
+        strict = over.pop("_strict", False)
+        diag = over.pop("_diag", None)
+        return setups.match_coiled(result(), ctx(**over), strict, diag)
+
+    def test_both_measures_below_the_floor_rejects(self):
+        self.assertIsNone(self.match(ud_weighted=0.90, ud_20=0.90))
+
+    def test_the_gate_is_live_in_this_predicate(self):
+        """The paired assertion. Without it, a gate that rejected EVERYTHING
+        would pass the test above and this file would never notice."""
+        self.assertIsNotNone(self.match())
+
+    def test_a_weak_close_weighted_ratio_alone_still_matches(self):
+        """distribution-into-strength: price drifts up, sellers own the close.
+        Surfaced with its label, never dropped."""
+        ev = self.match(ud_ratio=3.74, ud_weighted=0.59, ud_20=1.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_a_weak_twenty_day_ratio_alone_still_matches(self):
+        self.assertIsNotNone(self.match(ud_weighted=1.40, ud_20=0.50))
+
+    def test_the_floor_is_exclusive_on_both_arms(self):
+        """Exactly 1.0 is parity, not distribution. `<=` here would drop a name
+        whose buyers and sellers finished level."""
+        self.assertIsNotNone(self.match(ud_weighted=1.0, ud_20=0.90))
+        self.assertIsNotNone(self.match(ud_weighted=0.90, ud_20=1.0))
+        self.assertIsNone(self.match(ud_weighted=0.999, ud_20=0.999))
+
+    def test_an_unmeasurable_ratio_is_not_read_as_distribution(self):
+        """None means the series could not be judged -- for ud_weighted it means
+        NO bar closed below its own midpoint, the most bullish tape there is.
+        Two measures must both SAY distribution; one that says nothing does
+        not."""
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=0.50))
+        self.assertIsNotNone(self.match(ud_weighted=0.50, ud_20=None))
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=None))
+
+    def test_a_measured_zero_is_read_as_distribution(self):
+        """0.0 is the strongest possible statement of it and must reject through
+        the comparison, not survive as if it were missing."""
+        self.assertIsNone(self.match(ud_weighted=0.0, ud_20=0.0))
+
+    def test_the_strict_arm_of_the_pair_is_the_one_strict_reads(self):
+        """Both halves are 1.0 today, so only a temporarily-tightened pair can
+        show that strict indexes element 1 and loosened element 0."""
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIsNotNone(self.match(ud_weighted=1.2, ud_20=1.2))
+            self.assertIsNone(self.match(ud_weighted=1.2, ud_20=1.2,
+                                         _strict=True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_names_the_condition_a_passing_name_satisfies(self):
+        diag = {}
+        self.match(ud_weighted=0.90, ud_20=0.90, _diag=diag)
+        self.assertEqual(list(diag), [setups._distributing_label(False)])
 
 
 if __name__ == "__main__":

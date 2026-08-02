@@ -26,7 +26,8 @@ EXPECTED_COLUMNS = [
     "setup", "rank", "setup_fit",
     "score_now", "score_at_trigger", "risk_reward", "vetoed", "action",
     "price", "trigger_price", "stop",
-    "rs_1m", "rs_3m", "ud_ratio",
+    "rs_1m", "rs_3m", "ud_ratio", "ud_weighted", "ud_20",
+    "volume_signal", "accumulation_trend",
     "setups_matched", "match_count",
     "evidence_1_label", "evidence_1_value",
     "evidence_2_label", "evidence_2_value",
@@ -39,6 +40,23 @@ COILED_EV = {"contraction": 0.61, "pos_in_base": 0.82}
 BREAKOUT_EV = {"vol_mult": 2.4, "pct_above_base": 1.9, "base_bars": 40,
                "tightness": 5.0, "volume_light": False}
 
+# The five volume fields. Every default differs from every other, and the two
+# label vocabularies are disjoint, so a column reading a neighbouring field --
+# ud_weighted written from ud_ratio, the two labels transposed -- shows up as a
+# wrong value rather than passing on a fixture that repeats itself.
+VOLUME_FIELDS = ("ud_ratio", "ud_weighted", "ud_20", "volume_signal",
+                 "accumulation_trend")
+
+
+def volume(ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+           volume_signal="accumulation",
+           accumulation_trend="strengthening"):
+    """The five volume fields evaluate() puts at the top level of every matched
+    entry, CONFLUENCE included -- the shape build_result_row reads."""
+    return {"ud_ratio": ud_ratio, "ud_weighted": ud_weighted, "ud_20": ud_20,
+            "volume_signal": volume_signal,
+            "accumulation_trend": accumulation_trend}
+
 
 def result(symbol="TCS", **over):
     """One row in build_result_row's shape -- what rank() sorts and the CSV
@@ -47,8 +65,8 @@ def result(symbol="TCS", **over):
          "price": 200.0, "fit": 8.1, "evidence": dict(LEADER_EV),
          "total": 6.2, "trigger_total": 7.0, "trigger_price": 210.0,
          "stop": 185.0, "rr": 2.4, "rs_1m": 3.0, "rs_3m": 11.0,
-         "ud_ratio": 1.472,
          "vetoed": False, "action": "ALERT", "match_count": 1}
+    r.update(volume(ud_ratio=1.472, ud_weighted=0.638, ud_20=2.854))
     r.update(over)
     return r
 
@@ -170,10 +188,191 @@ class TestUpDownRatioColumn(unittest.TestCase):
             self.assertEqual(read_back(path)[0]["ud_ratio"], "0.0")
 
 
+class TestVolumeColumns(unittest.TestCase):
+    """The four columns that join ud_ratio: two more raw ratios and two labels.
+
+    ud_ratio alone cannot separate a name being accumulated from one being
+    distributed into strength -- both read above 1.0 -- so the file carries the
+    close-weighted ratio, the 20-bar ratio, and the two labels derived from
+    them, all as universal per-row columns rather than evidence slots.
+    """
+
+    NEW = ("ud_weighted", "ud_20", "volume_signal", "accumulation_trend")
+    RATIOS = ("ud_ratio", "ud_weighted", "ud_20")
+    LABELS = ("volume_signal", "accumulation_trend")
+
+    def one(self, **over):
+        return build([scanned()], {"LEADER": [result(**over)]}, ["LEADER"])[0]
+
+    def on_disk(self, **over):
+        row = self.one(**over)
+        with tmpdir() as d:
+            path = os.path.join(d, "s.csv")
+            csv_export.write_csv(path, [row])
+            return read_back(path)[0]
+
+    def test_every_new_field_reaches_its_own_column(self):
+        """Five distinct values, five distinct columns. Any pair of them crossed
+        -- ud_weighted from ud_ratio, ud_20 from ud_weighted, the two labels
+        transposed -- lands a visibly wrong value rather than a plausible one."""
+        row = self.one(ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+                       volume_signal="distribution-into-strength",
+                       accumulation_trend="fading")
+        self.assertEqual(row["ud_ratio"], 1.47)
+        self.assertEqual(row["ud_weighted"], 0.63)
+        self.assertEqual(row["ud_20"], 2.85)
+        self.assertEqual(row["volume_signal"], "distribution-into-strength")
+        self.assertEqual(row["accumulation_trend"], "fading")
+
+    def test_the_written_cells_match_the_written_header_positionally(self):
+        """Read back by POSITION, not by name: DictReader keyed on the header
+        would agree with itself even if the value order were wrong. This is the
+        assertion a column emitted one slot late fails."""
+        row = self.one(ud_ratio=1.47, ud_weighted=0.63, ud_20=2.85,
+                       volume_signal="supported",
+                       accumulation_trend="reversed")
+        with tmpdir() as d:
+            path = os.path.join(d, "s.csv")
+            csv_export.write_csv(path, [row])
+            header, values = [l.split(",") for l in raw_lines(path)]
+        cells = dict(zip(header, values))
+        self.assertEqual(header, csv_export.COLUMNS)
+        self.assertEqual(cells["ud_ratio"], "1.47")
+        self.assertEqual(cells["ud_weighted"], "0.63")
+        self.assertEqual(cells["ud_20"], "2.85")
+        self.assertEqual(cells["volume_signal"], "supported")
+        self.assertEqual(cells["accumulation_trend"], "reversed")
+
+    def test_the_two_new_ratios_are_raw_numbers_not_formatted_strings(self):
+        row = self.one()
+        self.assertIsInstance(row["ud_weighted"], float)
+        self.assertIsInstance(row["ud_20"], float)
+
+    def test_the_two_new_ratios_are_rounded_to_two_places_like_ud_ratio(self):
+        """The same convention, for the same reason: they are ratios built from
+        20 or 50 bars of volume, and the third decimal is noise the input cannot
+        support. The asserts fail on a three-place and a whole-number rounding
+        alike."""
+        row = self.one(ud_weighted=0.6349281, ud_20=2.8551749)
+        self.assertEqual(row["ud_weighted"], 0.63)
+        self.assertEqual(row["ud_20"], 2.86)
+        disk = self.on_disk(ud_weighted=0.6349281, ud_20=2.8551749)
+        self.assertEqual(disk["ud_weighted"], "0.63")
+        self.assertEqual(disk["ud_20"], "2.86")
+
+    def test_the_weighted_ratio_is_not_written_from_the_plain_one(self):
+        """The pair a copy-paste most easily crosses, and the one case where
+        crossing them inverts the finding: a plain ratio well above 1.0 beside a
+        weighted ratio below it IS distribution into strength."""
+        row = self.one(ud_ratio=1.90, ud_weighted=0.71)
+        self.assertEqual(row["ud_ratio"], 1.90)
+        self.assertEqual(row["ud_weighted"], 0.71)
+
+    def test_the_twenty_bar_ratio_is_not_written_from_the_fifty_bar_one(self):
+        row = self.one(ud_ratio=1.10, ud_20=2.40)
+        self.assertEqual(row["ud_ratio"], 1.10)
+        self.assertEqual(row["ud_20"], 2.40)
+
+    def test_the_labels_are_written_verbatim_including_the_hyphens(self):
+        """Nothing is title-cased, truncated or re-spelled on the way to the
+        file: these are the same words the terminal key defines, so a reader can
+        filter the file on the label the screen showed them."""
+        for signal in ("accumulation", "distribution-into-strength",
+                       "supported", "distribution", "unknown"):
+            self.assertEqual(self.on_disk(volume_signal=signal)["volume_signal"],
+                             signal)
+        for trend in ("strengthening", "steady", "flattening", "fading",
+                      "reversed", "unknown"):
+            self.assertEqual(
+                self.on_disk(accumulation_trend=trend)["accumulation_trend"],
+                trend)
+
+    def test_the_two_labels_are_not_transposed(self):
+        """Disjoint vocabularies: no signal is ever `steady`, no trend is ever
+        `supported`, so a swap cannot pass as a plausible row."""
+        disk = self.on_disk(volume_signal="supported",
+                            accumulation_trend="steady")
+        self.assertEqual(disk["volume_signal"], "supported")
+        self.assertEqual(disk["accumulation_trend"], "steady")
+
+    def test_a_missing_value_is_an_empty_cell_and_never_the_word_none(self):
+        """One field at a time, so no assertion is satisfied by a row that
+        blanked the whole block. `str(None)` would write the four characters
+        `None`, which sorts and filters as if it were a label of its own -- and
+        for the ratios it would break every consumer that sums the column."""
+        for key in self.RATIOS + self.LABELS:
+            with self.subTest(field=key):
+                row = self.one(**{key: None})
+                self.assertEqual(row[key], "")
+                disk = self.on_disk(**{key: None})
+                self.assertEqual(disk[key], "")
+                self.assertNotIn("None", list(disk.values()))
+                for other in self.RATIOS + self.LABELS:
+                    if other != key:
+                        self.assertNotEqual(disk[other], "", other)
+
+    def test_a_measured_zero_ratio_is_written_as_zero_not_left_blank(self):
+        """0.0 on the weighted ratio is a name whose every up-bar closed at its
+        low -- measured, not missing. `if v is None`, never `if not v`."""
+        for key in ("ud_weighted", "ud_20"):
+            with self.subTest(field=key):
+                self.assertEqual(self.one(**{key: 0.0})[key], 0.0)
+                self.assertEqual(self.on_disk(**{key: 0.0})[key], "0.0")
+
+    def test_an_empty_label_string_is_kept_rather_than_becoming_none(self):
+        """The sibling arm of the None case: `""` is not None, so text() must
+        leave it alone rather than routing it through the same branch."""
+        self.assertEqual(self.one(volume_signal="")["volume_signal"], "")
+
+    def test_a_row_missing_any_new_field_raises_rather_than_writing_a_blank(self):
+        """The sibling arm of the None case. None is a value that could not be
+        formed and is a blank cell honestly; a MISSING key is a caller that never
+        built the row build_result_row promises, and `.get` would blank -- or,
+        on a label, invent the real word `unknown` for -- the whole column."""
+        for key in self.NEW:
+            with self.subTest(field=key):
+                r = result()
+                del r[key]
+                with self.assertRaises(KeyError):
+                    build([scanned()], {"LEADER": [r]}, ["LEADER"])
+
+    def test_every_setup_including_confluence_carries_all_four(self):
+        """A DIFFERENT value per setup row: one value repeated down a column
+        would pass just as well if build_rows read the first row and reused it."""
+        rows = build([scanned(matched=("COILED", "LEADER"))],
+                     {"COILED": [result(ud_weighted=0.11, ud_20=1.11,
+                                        volume_signal="accumulation",
+                                        accumulation_trend="strengthening")],
+                      "LEADER": [result(ud_weighted=0.22, ud_20=2.22,
+                                        volume_signal="supported",
+                                        accumulation_trend="fading")],
+                      "CONFLUENCE": [result(ud_weighted=0.33, ud_20=3.33,
+                                            volume_signal="distribution",
+                                            accumulation_trend="reversed",
+                                            evidence={"count": 2,
+                                                      "label": "COILED+LEADER",
+                                                      "mean_fit": 8.0,
+                                                      "matched": ["COILED",
+                                                                  "LEADER"]})]},
+                     ["COILED", "LEADER", "CONFLUENCE"])
+        by_setup = {r["setup"]: r for r in rows}
+        self.assertEqual(sorted(by_setup), ["COILED", "CONFLUENCE", "LEADER"])
+        self.assertEqual({k: v["ud_weighted"] for k, v in by_setup.items()},
+                         {"COILED": 0.11, "LEADER": 0.22, "CONFLUENCE": 0.33})
+        self.assertEqual({k: v["ud_20"] for k, v in by_setup.items()},
+                         {"COILED": 1.11, "LEADER": 2.22, "CONFLUENCE": 3.33})
+        self.assertEqual({k: v["volume_signal"] for k, v in by_setup.items()},
+                         {"COILED": "accumulation", "LEADER": "supported",
+                          "CONFLUENCE": "distribution"})
+        self.assertEqual({k: v["accumulation_trend"] for k, v in by_setup.items()},
+                         {"COILED": "strengthening", "LEADER": "fading",
+                          "CONFLUENCE": "reversed"})
+
+
 class TestSchema(unittest.TestCase):
-    def test_columns_are_the_agreed_twenty_seven_in_order(self):
+    def test_columns_are_the_agreed_thirty_one_in_order(self):
         self.assertEqual(csv_export.COLUMNS, EXPECTED_COLUMNS)
-        self.assertEqual(len(csv_export.COLUMNS), 27)
+        self.assertEqual(len(csv_export.COLUMNS), 31)
 
     def test_the_up_down_ratio_sits_beside_relative_strength(self):
         """A universal metric, not an evidence slot: it means the same thing on
@@ -183,6 +382,26 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(cols[cols.index("rs_3m") + 1], "ud_ratio")
         self.assertNotIn("ud_ratio", [k for pair in csv_export.EVIDENCE.values()
                                       for k, _ in pair])
+
+    def test_the_four_new_volume_columns_follow_ud_ratio_in_order(self):
+        """Asserted as a contiguous slice, not four `in COLUMNS` checks: order
+        is the schema. A column emitted one position late shifts every value to
+        its right in a file whose reader keys on position."""
+        cols = csv_export.COLUMNS
+        start = cols.index("ud_ratio")
+        self.assertEqual(cols[start:start + 5],
+                         ["ud_ratio", "ud_weighted", "ud_20", "volume_signal",
+                          "accumulation_trend"])
+        self.assertEqual(cols[start + 5], "setups_matched")
+
+    def test_the_new_volume_columns_are_not_evidence_slots(self):
+        """Like ud_ratio: they mean the same thing on every row of every setup,
+        including CONFLUENCE, whose two evidence slots are already spoken for."""
+        evidence_keys = [k for pair in csv_export.EVIDENCE.values()
+                         for k, _ in pair]
+        for name in ("ud_weighted", "ud_20", "volume_signal",
+                     "accumulation_trend"):
+            self.assertNotIn(name, evidence_keys)
 
     def test_no_column_name_is_repeated(self):
         self.assertEqual(len(set(csv_export.COLUMNS)), len(csv_export.COLUMNS))
@@ -864,12 +1083,13 @@ def scan_row(symbol, sector="Information Technology", total=6.2,
              rr=2.4, atr=10.0):
     """A scan() row complete enough for build_result_row and the renderers.
 
-    Every matched entry carries `ud_ratio` at the top level beside `fit` and
-    `evidence` -- setups.evaluate's contract, and the key build_result_row
-    reads. A caller passing its own `matched` has to carry it too."""
+    Every matched entry carries the five volume fields at the top level beside
+    `fit` and `evidence` -- setups.evaluate's contract, and the keys
+    build_result_row reads. A caller passing its own `matched` has to carry them
+    too."""
     if matched is None:
-        matched = {"LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
-                              "ud_ratio": 1.47}}
+        matched = {"LEADER": dict({"fit": 8.0, "evidence": dict(LEADER_EV)},
+                                  **volume())}
     return {"symbol": symbol, "sector": sector, "illiquid": False, "diag": {},
             "rs": {"1m": rs[0], "3m": rs[1]}, "matched": matched,
             "o": {"price": price, "score": {"total": total, "verdict": verdict},
@@ -990,10 +1210,10 @@ class TestMainCsv(unittest.TestCase):
         rows = [scan_row("SYM%d" % i, total=9.0 - i * 0.1, matched={
             # A different ratio per symbol, the same on both of that symbol's
             # setups: it is a property of the name, not of the match.
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
-                       "ud_ratio": 1.0 + i / 100.0},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
-                       "ud_ratio": 1.0 + i / 100.0}})
+            "LEADER": dict({"fit": 8.0, "evidence": dict(LEADER_EV)},
+                           **volume(ud_ratio=1.0 + i / 100.0)),
+            "COILED": dict({"fit": 7.0, "evidence": dict(COILED_EV)},
+                           **volume(ud_ratio=1.0 + i / 100.0))})
             for i in range(25)]
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
@@ -1027,10 +1247,10 @@ class TestMainCsv(unittest.TestCase):
 
     def test_setup_filter_reaches_the_file(self):
         rows = [scan_row("A", matched={
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
-                       "ud_ratio": 1.47},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
-                       "ud_ratio": 1.47}})]
+            "LEADER": dict({"fit": 8.0, "evidence": dict(LEADER_EV)},
+                           **volume()),
+            "COILED": dict({"fit": 7.0, "evidence": dict(COILED_EV)},
+                           **volume())})]
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "coiled", "--csv", path], rows)
@@ -1109,19 +1329,20 @@ class TestMainCsv(unittest.TestCase):
 
     def test_confluence_rows_reach_the_file_with_blank_evidence(self):
         rows = [scan_row("A", matched={
-            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV),
-                       "ud_ratio": 1.47},
-            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV),
-                       "ud_ratio": 1.47},
-            # CONFLUENCE carries the same top-level key as its constituents,
-            # which is the whole reason the ratio does not live in the evidence:
-            # this entry's two evidence slots are the matched label and the mean
-            # fit, and there is no third one to put it in.
-            "CONFLUENCE": {"fit": 7.5, "ud_ratio": 1.47,
-                           "evidence": {"matched": ["COILED", "LEADER"],
-                                        "count": 2,
-                                        "label": "COILED+LEADER",
-                                        "mean_fit": 7.5}}})]
+            "LEADER": dict({"fit": 8.0, "evidence": dict(LEADER_EV)},
+                           **volume()),
+            "COILED": dict({"fit": 7.0, "evidence": dict(COILED_EV)},
+                           **volume()),
+            # CONFLUENCE carries the same top-level keys as its constituents,
+            # which is the whole reason they do not live in the evidence: this
+            # entry's two evidence slots are the matched label and the mean fit,
+            # and there is no third one to put five more fields in.
+            "CONFLUENCE": dict({"fit": 7.5,
+                                "evidence": {"matched": ["COILED", "LEADER"],
+                                             "count": 2,
+                                             "label": "COILED+LEADER",
+                                             "mean_fit": 7.5}},
+                               **volume())})]
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "all", "--csv", path], rows)

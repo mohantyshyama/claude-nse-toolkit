@@ -53,7 +53,13 @@ def ctx_for(rows):
     # ever reaches the Fit.
     return {"rows": rows, "rs": {"1m": 4.0, "3m": 7.0},
             "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
-            "ud_ratio": 1.60}
+            # ud_weighted 1.30 and ud_20 1.55 alongside it: three DIFFERENT
+            # numbers, so a fit term reading the wrong key, or a gate reading the
+            # 50-bar ratio where it means the 20-bar one, changes the answer. Both
+            # clear the 1.0 distribution floor, and 1.55/1.60 bands "steady", so
+            # every pre-existing case here still turns on the condition it was
+            # written for rather than on a trend penalty.
+            "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
 
 
 #: Bars that AGREE with result()'s range: a 100-110 base under a final bar that
@@ -100,8 +106,11 @@ class TestBreakoutMatches(unittest.TestCase):
     def test_evidence_reports_every_documented_key(self):
         ev = setups.match_breakout(result(), CTX)
         self.assertEqual(set(ev), {"vol_mult", "pct_above_base", "base_bars",
-                                   "tightness", "volume_light", "ud_ratio"})
+                                   "tightness", "volume_light", "ud_ratio",
+                                   "ud_weighted", "ud_20"})
         self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
+        self.assertAlmostEqual(ev["ud_weighted"], 1.30, places=6)
+        self.assertAlmostEqual(ev["ud_20"], 1.55, places=6)
         self.assertEqual(ev["base_bars"], 20)
         self.assertAlmostEqual(ev["tightness"], 9.0909090909, places=8)
 
@@ -270,15 +279,15 @@ class TestTightnessExcludesTheBreakoutBar(unittest.TestCase):
         8.0 penalty threshold; the old 19.2% was not, and costs 0.32 of fit.
 
         Volume bands to 9, freshness (4.55% above the base) to 8, a 20-bar base
-        to 8 and the ctx ratio of 1.60 to 8, so
-        0.35*9 + 0.25*8 + 0.20*8 + 0.20*8 = 3.15 + 2.0 + 1.6 + 1.6 = 8.35.
+        to 8 and the ctx trio of 1.60/1.30/1.55 to 7, so
+        0.35*9 + 0.25*8 + 0.20*8 + 0.20*7 = 3.15 + 2.0 + 1.6 + 1.4 = 8.15.
         The penalised case takes base quality to 6.4: 0.20 * 1.6 = 0.32 less.
         """
         strong = self.case(115.0, 130.0)
         self.assertLess(strong["tightness"], 8.0)
-        self.assertAlmostEqual(setups.fit_breakout(strong), 8.35, places=6)
+        self.assertAlmostEqual(setups.fit_breakout(strong), 8.15, places=6)
         self.assertAlmostEqual(
-            setups.fit_breakout(dict(strong, tightness=19.23)), 8.03, places=6)
+            setups.fit_breakout(dict(strong, tightness=19.23)), 7.83, places=6)
 
     def test_a_genuinely_wide_base_is_still_penalised(self):
         """The other arm: the fix must not disable the penalty, only stop the
@@ -653,8 +662,14 @@ class TestBreakoutFunnel(unittest.TestCase):
 
 class TestBreakoutFit(unittest.TestCase):
     def ev(self, **over):
+        # The same trio the ctx fixtures carry: 1.60 bands to 8, 1.30 to 6, the
+        # two share the accumulation term equally and 1.55/1.60 bands "steady",
+        # so accumulation is 7.0 and every remainder constant below is derived
+        # from it. Three DIFFERENT numbers, so a fit reading the wrong one of
+        # them moves every case in this class rather than none of them.
         e = {"vol_mult": 2.5, "pct_above_base": 1.0, "base_bars": 20,
-             "tightness": 5.0, "volume_light": False, "ud_ratio": 1.60}
+             "tightness": 5.0, "volume_light": False,
+             "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
         e.update(over)
         return e
 
@@ -679,13 +694,13 @@ class TestBreakoutFit(unittest.TestCase):
 
     def test_weights_are_thirty_five_twenty_five_twenty_twenty(self):
         """Pins the absolute score. vol 2.5 -> 9, freshness 1.0 -> 10,
-        base 20 bars -> 8, tightness 5.0 -> no penalty, accumulation 1.60 -> 8.
-        0.35*9 + 0.25*10 + 0.20*8 + 0.20*8 = 3.15 + 2.5 + 1.6 + 1.6 = 8.85.
-        Equal quarters would give 8.75, and the second case separates them
-        further: vol 1.5 -> 4 gives 0.35*4 + 5.7 = 7.1 against 7.5.
+        base 20 bars -> 8, tightness 5.0 -> no penalty, accumulation 7.0.
+        0.35*9 + 0.25*10 + 0.20*8 + 0.20*7 = 3.15 + 2.5 + 1.6 + 1.4 = 8.65.
+        Equal quarters would give 8.5, and the second case separates them
+        further: vol 1.5 -> 4 gives 0.35*4 + 5.5 = 6.9 against 7.25.
         """
-        self.assertAlmostEqual(setups.fit_breakout(self.ev()), 8.85, places=6)
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(vol_mult=1.5)), 7.1,
+        self.assertAlmostEqual(setups.fit_breakout(self.ev()), 8.65, places=6)
+        self.assertAlmostEqual(setups.fit_breakout(self.ev(vol_mult=1.5)), 6.9,
                                places=6)
 
     def test_the_accumulation_term_is_exactly_a_fifth_of_the_score(self):
@@ -696,18 +711,41 @@ class TestBreakoutFit(unittest.TestCase):
         both arms are live -- unlike LEADER and TURN, where anything under 1.25
         is rejected before this function runs.
         """
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(ud_ratio=1.60))
-                               - setups.fit_breakout(self.ev(ud_ratio=0.80)),
-                               1.2, places=6)
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(ud_ratio=0.80)), 7.65,
-                               places=6)
+        strong = self.ev(ud_ratio=1.60, ud_weighted=1.60, ud_20=1.60)
+        weak = self.ev(ud_ratio=0.80, ud_weighted=0.80, ud_20=0.80)
+        self.assertAlmostEqual(setups.fit_breakout(strong)
+                               - setups.fit_breakout(weak), 1.2, places=6)
+        self.assertAlmostEqual(setups.fit_breakout(weak), 7.65, places=6)
+
+    def test_the_close_weighted_ratio_carries_half_the_term(self):
+        """CONCORDBIO's shape: 3.74 close-to-close, 0.59 close-weighted. Only
+        the second moves, so half the term does: 0.20 * 0.5 * (10 - 2) = 0.8."""
+        closing_strong = self.ev(ud_ratio=3.74, ud_weighted=3.74, ud_20=3.74)
+        sold_into = self.ev(ud_ratio=3.74, ud_weighted=0.59, ud_20=3.74)
+        self.assertAlmostEqual(setups.fit_breakout(closing_strong)
+                               - setups.fit_breakout(sold_into), 0.8, places=6)
+
+    def test_a_fading_trend_costs_half_what_a_reversed_one_does(self):
+        """The deduction, at both its live values, with the two levels held."""
+        steady = self.ev(ud_ratio=2.0, ud_weighted=2.0, ud_20=2.0)
+        fading = self.ev(ud_ratio=2.0, ud_weighted=2.0, ud_20=1.2)
+        rev = self.ev(ud_ratio=2.0, ud_weighted=2.0, ud_20=0.9)
+        self.assertEqual(setups.accumulation_trend(2.0, 1.2), setups.TREND_FADING)
+        self.assertEqual(setups.accumulation_trend(2.0, 0.9), setups.TREND_REVERSED)
+        self.assertAlmostEqual(setups.fit_breakout(steady)
+                               - setups.fit_breakout(fading), 0.20 * 1.0, places=6)
+        self.assertAlmostEqual(setups.fit_breakout(steady)
+                               - setups.fit_breakout(rev), 0.20 * 2.0, places=6)
 
     def test_an_unmeasurable_ratio_scores_the_floor(self):
         """None is not rewarded for the absence of evidence: it ties with a
         measurably distributing name rather than beating one."""
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(ud_ratio=None)),
-                               setups.fit_breakout(self.ev(ud_ratio=0.80)),
-                               places=6)
+        self.assertAlmostEqual(
+            setups.fit_breakout(self.ev(ud_ratio=None, ud_weighted=None,
+                                        ud_20=None)),
+            setups.fit_breakout(self.ev(ud_ratio=0.80, ud_weighted=0.80,
+                                        ud_20=0.80)),
+            places=6)
 
     def test_wide_base_is_penalised_twenty_percent(self):
         """Both arms of the `tightness > 8.0` penalty, at the boundary.
@@ -716,9 +754,9 @@ class TestBreakoutFit(unittest.TestCase):
         by 0.20 * 1.6 = 0.32. Without a case on each side the branch is half
         dead whichever way the comparison is written.
         """
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(tightness=8.0)), 8.85,
+        self.assertAlmostEqual(setups.fit_breakout(self.ev(tightness=8.0)), 8.65,
                                places=6)
-        self.assertAlmostEqual(setups.fit_breakout(self.ev(tightness=8.01)), 8.53,
+        self.assertAlmostEqual(setups.fit_breakout(self.ev(tightness=8.01)), 8.33,
                                places=6)
 
     def test_penalty_scales_the_base_term_only(self):
@@ -741,16 +779,16 @@ class TestBreakoutFit(unittest.TestCase):
         DOWN (2.5 -> 2.4) leaves 2.5 in the same band and survives. The paired
         just-below case forces the next band down, so a cut cannot move in
         either direction. Sub-score is recovered by inverting the fixed
-        0.25*10 + 0.20*8 + 0.20*8 = 5.7 remainder.
+        0.25*10 + 0.20*8 + 0.20*7 = 5.5 remainder.
         """
         cuts = [(3.0, 10), (2.5, 9), (2.0, 8), (1.75, 6), (1.5, 4)]
         for i, (mult, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_breakout(self.ev(vol_mult=mult)),
-                                   round(0.35 * sub + 5.7, 2), places=6,
+                                   round(0.35 * sub + 5.5, 2), places=6,
                                    msg="at cut %s" % mult)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(setups.fit_breakout(self.ev(vol_mult=mult - 0.001)),
-                                   round(0.35 * below + 5.7, 2), places=6,
+                                   round(0.35 * below + 5.5, 2), places=6,
                                    msg="just below cut %s" % mult)
 
     def test_every_freshness_cut_is_reachable(self):
@@ -758,32 +796,33 @@ class TestBreakoutFit(unittest.TestCase):
         cuts = [(2.0, 10), (5.0, 8), (8.0, 6), (12.0, 4)]
         for i, (pct, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_breakout(self.ev(pct_above_base=pct)),
-                                   round(3.15 + 0.25 * sub + 3.2, 2), places=6,
+                                   round(3.15 + 0.25 * sub + 3.0, 2), places=6,
                                    msg="at cut %s" % pct)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_breakout(self.ev(pct_above_base=pct + 0.001)),
-                round(3.15 + 0.25 * above + 3.2, 2), places=6,
+                round(3.15 + 0.25 * above + 3.0, 2), places=6,
                 msg="just above cut %s" % pct)
 
     def test_every_base_length_cut_is_reachable(self):
         cuts = [(30, 10), (20, 8), (15, 6), (12, 4)]
         for i, (bars, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_breakout(self.ev(base_bars=bars)),
-                                   round(3.15 + 2.5 + 0.20 * sub + 1.6, 2), places=6,
+                                   round(3.15 + 2.5 + 0.20 * sub + 1.4, 2), places=6,
                                    msg="at cut %s" % bars)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(setups.fit_breakout(self.ev(base_bars=bars - 1)),
-                                   round(3.15 + 2.5 + 0.20 * below + 1.6, 2), places=6,
+                                   round(3.15 + 2.5 + 0.20 * below + 1.4, 2), places=6,
                                    msg="just below cut %s" % bars)
 
     def test_fit_stays_inside_zero_to_ten(self):
-        # ud_ratio 3.0 tops the accumulation ladder, so `best` is genuinely the
-        # maximum of every term rather than the maximum of four out of five.
+        # All three volume numbers at 3.0 top the accumulation term: both
+        # ladders at 10 and a steady trend, so `best` is genuinely the maximum
+        # of every term rather than the maximum of four out of five.
         best = self.ev(vol_mult=9.0, pct_above_base=0.0, base_bars=200,
-                       tightness=1.0, ud_ratio=3.0)
+                       tightness=1.0, ud_ratio=3.0, ud_weighted=3.0, ud_20=3.0)
         worst = self.ev(vol_mult=1.5, pct_above_base=12.0, base_bars=12,
-                        tightness=40.0, ud_ratio=0.5)
+                        tightness=40.0, ud_ratio=0.5, ud_weighted=0.5, ud_20=0.5)
         self.assertAlmostEqual(setups.fit_breakout(best), 10.0, places=6)
         self.assertTrue(0.0 <= setups.fit_breakout(worst) <= 10.0)
 
@@ -832,6 +871,78 @@ class TestBreakoutThresholdTable(unittest.TestCase):
                                 "px=%s v=%s bars=%s sma50=%s"
                                 % (price, v, bars, sma50))
         self.assertGreater(checked, 0, "grid produced no strict matches at all")
+
+
+class TestBreakoutDistributionGate(unittest.TestCase):
+    """The unambiguous case only: BOTH new measures under the floor at once.
+
+    Two independent measurements have to agree that the name is being
+    distributed NOW before it is dropped. Either one alone is a finding the
+    table prints -- a `distribution-into-strength` name still matches -- and
+    only the doubly-confirmed case is excluded.
+    """
+
+    def match(self, **over):
+        strict = over.pop("_strict", False)
+        diag = over.pop("_diag", None)
+        return setups.match_breakout(result(), dict(CTX, **over), strict, diag)
+
+    def test_both_measures_below_the_floor_rejects(self):
+        self.assertIsNone(self.match(ud_weighted=0.90, ud_20=0.90))
+
+    def test_the_gate_is_live_in_this_predicate(self):
+        """The paired assertion. Without it, a gate that rejected EVERYTHING
+        would pass the test above and this file would never notice."""
+        self.assertIsNotNone(self.match())
+
+    def test_a_weak_close_weighted_ratio_alone_still_matches(self):
+        """distribution-into-strength: price drifts up, sellers own the close.
+        Surfaced with its label, never dropped."""
+        ev = self.match(ud_ratio=3.74, ud_weighted=0.59, ud_20=1.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_a_weak_twenty_day_ratio_alone_still_matches(self):
+        self.assertIsNotNone(self.match(ud_weighted=1.40, ud_20=0.50))
+
+    def test_the_floor_is_exclusive_on_both_arms(self):
+        """Exactly 1.0 is parity, not distribution. `<=` here would drop a name
+        whose buyers and sellers finished level."""
+        self.assertIsNotNone(self.match(ud_weighted=1.0, ud_20=0.90))
+        self.assertIsNotNone(self.match(ud_weighted=0.90, ud_20=1.0))
+        self.assertIsNone(self.match(ud_weighted=0.999, ud_20=0.999))
+
+    def test_an_unmeasurable_ratio_is_not_read_as_distribution(self):
+        """None means the series could not be judged -- for ud_weighted it means
+        NO bar closed below its own midpoint, the most bullish tape there is.
+        Two measures must both SAY distribution; one that says nothing does
+        not."""
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=0.50))
+        self.assertIsNotNone(self.match(ud_weighted=0.50, ud_20=None))
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=None))
+
+    def test_a_measured_zero_is_read_as_distribution(self):
+        """0.0 is the strongest possible statement of it and must reject through
+        the comparison, not survive as if it were missing."""
+        self.assertIsNone(self.match(ud_weighted=0.0, ud_20=0.0))
+
+    def test_the_strict_arm_of_the_pair_is_the_one_strict_reads(self):
+        """Both halves are 1.0 today, so only a temporarily-tightened pair can
+        show that strict indexes element 1 and loosened element 0."""
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIsNotNone(self.match(ud_weighted=1.2, ud_20=1.2))
+            self.assertIsNone(self.match(ud_weighted=1.2, ud_20=1.2,
+                                         _strict=True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_names_the_condition_a_passing_name_satisfies(self):
+        diag = {}
+        self.match(ud_weighted=0.90, ud_20=0.90, _diag=diag)
+        self.assertEqual(list(diag), [setups._distributing_label(False)])
 
 
 if __name__ == "__main__":

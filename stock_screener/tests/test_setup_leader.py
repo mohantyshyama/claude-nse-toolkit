@@ -34,7 +34,14 @@ def ctx(rs_1m=3.0, rs_3m=12.0, **over):
     # the number deliberately on both sides of both floors.
     c = {"rows": ROWS, "rs": {"1m": rs_1m, "3m": rs_3m},
          "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
-         "run_pct": 2.0, "ud_ratio": 1.60}
+         "run_pct": 2.0,
+         # ud_weighted 1.30 and ud_20 1.55 alongside it: three DIFFERENT
+         # numbers, so a fit term reading the wrong key, or a gate reading the
+         # 50-bar ratio where it means the 20-bar one, changes the answer. Both
+         # clear the 1.0 distribution floor, and 1.55/1.60 bands "steady", so
+         # every pre-existing case here still turns on the condition it was
+         # written for rather than on a trend penalty.
+         "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
     c.update(over)
     return c
 
@@ -74,8 +81,11 @@ class TestLeaderMatches(unittest.TestCase):
     def test_evidence_reports_every_documented_key(self):
         ev = setups.match_leader(result(), ctx(rs_1m=3.0, rs_3m=12.0))
         self.assertEqual(set(ev), {"pct_from_high", "rs_1m", "rs_3m",
-                                   "full_stack", "ud_ratio"})
+                                   "full_stack", "ud_ratio", "ud_weighted",
+                                   "ud_20"})
         self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
+        self.assertAlmostEqual(ev["ud_weighted"], 1.30, places=6)
+        self.assertAlmostEqual(ev["ud_20"], 1.55, places=6)
         self.assertAlmostEqual(ev["rs_1m"], 3.0, places=6)
         self.assertAlmostEqual(ev["rs_3m"], 12.0, places=6)
 
@@ -488,8 +498,13 @@ class TestLeaderFit(unittest.TestCase):
         # full marks. It also clears LEADER's own 1.25/1.50 gate, so the
         # hand-built evidence here and a real match_leader() result describe the
         # same name.
+        # ud_weighted 1.30 bands to 6 and ud_20 1.55 makes the trend "steady",
+        # so accumulation is 7.0 and every remainder constant below derives
+        # from it. Three DIFFERENT numbers, so a fit reading the wrong one of
+        # them moves every case in this class rather than none of them.
         e = {"pct_from_high": 3.0, "rs_1m": 3.0, "rs_3m": 12.0,
-             "full_stack": True, "ud_ratio": 1.60}
+             "full_stack": True,
+             "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
         e.update(over)
         return e
 
@@ -509,16 +524,14 @@ class TestLeaderFit(unittest.TestCase):
                            setups.fit_leader(self.ev(full_stack=False)))
 
     def test_weights_are_thirty_five_thirty_fifteen_twenty(self):
-        """rs 12.0 -> 8, distance 3.0 -> 8, full stack -> 10, accumulation
-        1.60 -> 8.
-        0.35*8 + 0.30*8 + 0.15*10 + 0.20*8 = 2.8 + 2.4 + 1.5 + 1.6 = 8.3.
-        Equal quarters would give 8.5, and the second case (rs 25 -> 10)
-        separates them further: 0.35*10 + 5.5 = 9.0 versus 9.0 for equal
-        quarters -- which is why the FIRST case is the one that discriminates
-        and both are asserted.
+        """rs 12.0 -> 8, distance 3.0 -> 8, full stack -> 10, accumulation 7.0.
+        0.35*8 + 0.30*8 + 0.15*10 + 0.20*7 = 2.8 + 2.4 + 1.5 + 1.4 = 8.1.
+        Equal quarters would give 8.25, and the second case (rs 25 -> 10)
+        separates them further: 0.35*10 + 5.3 = 8.8 versus 8.75 for equal
+        quarters.
         """
-        self.assertAlmostEqual(setups.fit_leader(self.ev()), 8.3, places=6)
-        self.assertAlmostEqual(setups.fit_leader(self.ev(rs_3m=25.0)), 9.0, places=6)
+        self.assertAlmostEqual(setups.fit_leader(self.ev()), 8.1, places=6)
+        self.assertAlmostEqual(setups.fit_leader(self.ev(rs_3m=25.0)), 8.8, places=6)
 
     def test_stack_bonus_is_exactly_three_points_of_sub_score(self):
         """10 vs 7 at a weight of 0.15 is a 0.45 gap. An ordering assertion
@@ -526,7 +539,7 @@ class TestLeaderFit(unittest.TestCase):
         self.assertAlmostEqual(setups.fit_leader(self.ev(full_stack=True))
                                - setups.fit_leader(self.ev(full_stack=False)),
                                0.45, places=6)
-        self.assertAlmostEqual(setups.fit_leader(self.ev(full_stack=False)), 7.85,
+        self.assertAlmostEqual(setups.fit_leader(self.ev(full_stack=False)), 7.65,
                                places=6)
 
     def test_the_accumulation_term_is_exactly_a_fifth_of_the_score(self):
@@ -537,23 +550,42 @@ class TestLeaderFit(unittest.TestCase):
         names the gate has already admitted, and a fixture below 1.25 would be
         scoring a name the screen never shows.
         """
-        self.assertAlmostEqual(setups.fit_leader(self.ev(ud_ratio=1.60))
-                               - setups.fit_leader(self.ev(ud_ratio=1.30)),
-                               0.4, places=6)
-        self.assertAlmostEqual(setups.fit_leader(self.ev(ud_ratio=1.30)), 7.9,
-                               places=6)
+        strong = self.ev(ud_ratio=1.60, ud_weighted=1.60, ud_20=1.60)
+        softer = self.ev(ud_ratio=1.30, ud_weighted=1.30, ud_20=1.30)
+        self.assertAlmostEqual(setups.fit_leader(strong)
+                               - setups.fit_leader(softer), 0.4, places=6)
+        self.assertAlmostEqual(setups.fit_leader(softer), 7.9, places=6)
+
+    def test_the_close_weighted_ratio_separates_two_names_the_gate_admitted(self):
+        """LEADER gates on the close-to-close ratio alone, so a name being sold
+        into every close can clear it. HYUNDAI reads 2.86 and 0.63. Half the
+        term moves: 0.20 * 0.5 * (10 - 2) = 0.8."""
+        clean = self.ev(ud_ratio=2.86, ud_weighted=2.86, ud_20=2.86)
+        sold = self.ev(ud_ratio=2.86, ud_weighted=0.63, ud_20=2.86)
+        self.assertAlmostEqual(setups.fit_leader(clean)
+                               - setups.fit_leader(sold), 0.8, places=6)
+
+    def test_a_stale_accumulation_level_is_deducted(self):
+        """CONCORDBIO reads 3.74 over 50 bars and 1.18 over 20 -- fading, which
+        costs 1.0 ladder point, 0.20 of the total."""
+        fresh = self.ev(ud_ratio=3.74, ud_weighted=3.74, ud_20=3.74)
+        stale = self.ev(ud_ratio=3.74, ud_weighted=3.74, ud_20=1.18)
+        self.assertEqual(setups.accumulation_trend(3.74, 1.18),
+                         setups.TREND_FADING)
+        self.assertAlmostEqual(setups.fit_leader(fresh)
+                               - setups.fit_leader(stale), 0.20, places=6)
 
     def test_every_relative_strength_cut_is_reachable(self):
         """At the cut and just below it, so a cut cannot move in either
-        direction. The 0.30*8 + 0.15*10 + 0.20*8 = 5.5 remainder is held fixed."""
+        direction. The 0.30*8 + 0.15*10 + 0.20*7 = 5.3 remainder is held fixed."""
         cuts = [(20.0, 10), (10.0, 8), (5.0, 6), (0.0, 4)]
         for i, (rs, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_leader(self.ev(rs_3m=rs)),
-                                   round(0.35 * sub + 5.5, 2), places=6,
+                                   round(0.35 * sub + 5.3, 2), places=6,
                                    msg="at cut %s" % rs)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(setups.fit_leader(self.ev(rs_3m=rs - 0.001)),
-                                   round(0.35 * below + 5.5, 2), places=6,
+                                   round(0.35 * below + 5.3, 2), places=6,
                                    msg="just below cut %s" % rs)
 
     def test_every_proximity_cut_is_reachable(self):
@@ -561,12 +593,12 @@ class TestLeaderFit(unittest.TestCase):
         cuts = [(2.0, 10), (5.0, 8), (10.0, 6)]
         for i, (pct, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_leader(self.ev(pct_from_high=pct)),
-                                   round(2.8 + 0.30 * sub + 3.1, 2), places=6,
+                                   round(2.8 + 0.30 * sub + 2.9, 2), places=6,
                                    msg="at cut %s" % pct)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_leader(self.ev(pct_from_high=pct + 0.001)),
-                round(2.8 + 0.30 * above + 3.1, 2), places=6,
+                round(2.8 + 0.30 * above + 2.9, 2), places=6,
                 msg="just above cut %s" % pct)
 
     def test_every_accumulation_cut_is_reachable(self):
@@ -580,19 +612,23 @@ class TestLeaderFit(unittest.TestCase):
         """
         cuts = [(2.50, 10), (2.00, 9), (1.50, 8), (1.25, 6), (1.00, 4)]
         for i, (ud, sub) in enumerate(cuts):
-            self.assertAlmostEqual(setups.fit_leader(self.ev(ud_ratio=ud)),
-                                   round(0.20 * sub + 6.7, 2), places=6,
-                                   msg="at cut %s" % ud)
+            # Both ladders on the same rung and a steady trend, so the term is
+            # exactly that rung and the ladder is seen whole.
+            self.assertAlmostEqual(
+                setups.fit_leader(self.ev(ud_ratio=ud, ud_weighted=ud, ud_20=ud)),
+                round(0.20 * sub + 6.7, 2), places=6, msg="at cut %s" % ud)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 2.0
-            self.assertAlmostEqual(setups.fit_leader(self.ev(ud_ratio=ud - 0.001)),
-                                   round(0.20 * below + 6.7, 2), places=6,
-                                   msg="just below cut %s" % ud)
+            lo = ud - 0.001
+            self.assertAlmostEqual(
+                setups.fit_leader(self.ev(ud_ratio=lo, ud_weighted=lo, ud_20=lo)),
+                round(0.20 * below + 6.7, 2), places=6,
+                msg="just below cut %s" % ud)
 
     def test_fit_stays_inside_zero_to_ten(self):
         best = self.ev(rs_3m=90.0, pct_from_high=0.0, full_stack=True,
-                       ud_ratio=3.0)
+                       ud_ratio=3.0, ud_weighted=3.0, ud_20=3.0)
         worst = self.ev(rs_3m=0.01, pct_from_high=10.0, full_stack=False,
-                        ud_ratio=1.25)
+                        ud_ratio=1.25, ud_weighted=1.25, ud_20=1.25)
         self.assertAlmostEqual(setups.fit_leader(best), 10.0, places=6)
         self.assertTrue(0.0 <= setups.fit_leader(worst) <= 10.0)
 
@@ -725,6 +761,78 @@ class TestLeaderNeedsAccumulation(unittest.TestCase):
         (label, (step, _)), = diag.items()
         self.assertIn("down-thrust", label)
         self.assertEqual(step, 10)
+
+
+class TestLeaderDistributionGate(unittest.TestCase):
+    """The unambiguous case only: BOTH new measures under the floor at once.
+
+    Two independent measurements have to agree that the name is being
+    distributed NOW before it is dropped. Either one alone is a finding the
+    table prints -- a `distribution-into-strength` name still matches -- and
+    only the doubly-confirmed case is excluded.
+    """
+
+    def match(self, **over):
+        strict = over.pop("_strict", False)
+        diag = over.pop("_diag", None)
+        return setups.match_leader(result(), ctx(**over), strict, diag)
+
+    def test_both_measures_below_the_floor_rejects(self):
+        self.assertIsNone(self.match(ud_weighted=0.90, ud_20=0.90))
+
+    def test_the_gate_is_live_in_this_predicate(self):
+        """The paired assertion. Without it, a gate that rejected EVERYTHING
+        would pass the test above and this file would never notice."""
+        self.assertIsNotNone(self.match())
+
+    def test_a_weak_close_weighted_ratio_alone_still_matches(self):
+        """distribution-into-strength: price drifts up, sellers own the close.
+        Surfaced with its label, never dropped."""
+        ev = self.match(ud_ratio=3.74, ud_weighted=0.59, ud_20=1.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_a_weak_twenty_day_ratio_alone_still_matches(self):
+        self.assertIsNotNone(self.match(ud_weighted=1.40, ud_20=0.50))
+
+    def test_the_floor_is_exclusive_on_both_arms(self):
+        """Exactly 1.0 is parity, not distribution. `<=` here would drop a name
+        whose buyers and sellers finished level."""
+        self.assertIsNotNone(self.match(ud_weighted=1.0, ud_20=0.90))
+        self.assertIsNotNone(self.match(ud_weighted=0.90, ud_20=1.0))
+        self.assertIsNone(self.match(ud_weighted=0.999, ud_20=0.999))
+
+    def test_an_unmeasurable_ratio_is_not_read_as_distribution(self):
+        """None means the series could not be judged -- for ud_weighted it means
+        NO bar closed below its own midpoint, the most bullish tape there is.
+        Two measures must both SAY distribution; one that says nothing does
+        not."""
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=0.50))
+        self.assertIsNotNone(self.match(ud_weighted=0.50, ud_20=None))
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=None))
+
+    def test_a_measured_zero_is_read_as_distribution(self):
+        """0.0 is the strongest possible statement of it and must reject through
+        the comparison, not survive as if it were missing."""
+        self.assertIsNone(self.match(ud_weighted=0.0, ud_20=0.0))
+
+    def test_the_strict_arm_of_the_pair_is_the_one_strict_reads(self):
+        """Both halves are 1.0 today, so only a temporarily-tightened pair can
+        show that strict indexes element 1 and loosened element 0."""
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIsNotNone(self.match(ud_weighted=1.2, ud_20=1.2))
+            self.assertIsNone(self.match(ud_weighted=1.2, ud_20=1.2,
+                                         _strict=True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_names_the_condition_a_passing_name_satisfies(self):
+        diag = {}
+        self.match(ud_weighted=0.90, ud_20=0.90, _diag=diag)
+        self.assertEqual(list(diag), [setups._distributing_label(False)])
 
 
 if __name__ == "__main__":

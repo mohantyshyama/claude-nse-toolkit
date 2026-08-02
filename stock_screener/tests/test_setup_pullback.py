@@ -97,7 +97,13 @@ def far_from_ma(support, atr=2.5, price=103.5):
 # retracement's volume against the advance's), so the value only reaches the Fit.
 CTX = {"rows": ROWS, "rs": {"1m": -1.0, "3m": 4.0},
        "atr_pctile": 0.5, "sma200_rising": True, "sma50_rising": True,
-       "ud_ratio": 1.60}
+       # ud_weighted 1.30 and ud_20 1.55 alongside it: three DIFFERENT
+       # numbers, so a fit term reading the wrong key, or a gate reading the
+       # 50-bar ratio where it means the 20-bar one, changes the answer. Both
+       # clear the 1.0 distribution floor, and 1.55/1.60 bands "steady", so
+       # every pre-existing case here still turns on the condition it was
+       # written for rather than on a trend penalty.
+       "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55}
 FALLING = dict(CTX, sma200_rising=False)
 
 
@@ -194,8 +200,11 @@ class TestPullbackMatches(unittest.TestCase):
         self.assertEqual(set(ev), {"dist_to_ma_pct", "rsi", "dryup",
                                    "close_position", "retrace_pct",
                                    "pullback_vol_ratio", "ud_ratio",
+                                   "ud_weighted", "ud_20",
                                    "retrace_of_52w_range_pct"})
         self.assertAlmostEqual(ev["ud_ratio"], 1.60, places=6)
+        self.assertAlmostEqual(ev["ud_weighted"], 1.30, places=6)
+        self.assertAlmostEqual(ev["ud_20"], 1.55, places=6)
         # The nine-bar retracement leg is eight tail bars at PULLBACK_VOL plus
         # the clean reversal bar rows_for() substitutes in, which carries
         # REVERSAL_VOL of its own; the thirty-bar advance is all ADVANCE_VOL.
@@ -213,11 +222,16 @@ class TestPullbackMatches(unittest.TestCase):
 
         `ctx.get("ud_ratio") or 1.0` would print a confident "1.00" instead.
         """
-        ev = pull(result(), dict(CTX, ud_ratio=None))
+        ev = pull(result(), dict(CTX, ud_ratio=None, ud_weighted=None,
+                                 ud_20=None))
         self.assertIsNotNone(ev)
         self.assertIsNone(ev["ud_ratio"])
+        self.assertIsNone(ev["ud_weighted"])
+        self.assertIsNone(ev["ud_20"])
         self.assertAlmostEqual(setups.fit_pullback(ev),
-                               setups.fit_pullback(dict(ev, ud_ratio=0.5)),
+                               setups.fit_pullback(dict(ev, ud_ratio=0.5,
+                                                        ud_weighted=0.5,
+                                                        ud_20=0.5)),
                                places=6)
 
     def test_a_measured_zero_reaches_the_evidence_as_zero(self):
@@ -1052,8 +1066,13 @@ class TestPullbackFit(unittest.TestCase):
         # a live gate, so a real match carries it, and leaving it in the fixture
         # means a fit_pullback that went back to reading it would be caught by
         # the weights test rather than by a KeyError that looks like a typo.
+        # The same trio the CTX fixture carries: 1.60 bands to 8, 1.30 to 6,
+        # 1.55/1.60 bands "steady", so accumulation is 7.0 and every remainder
+        # constant below derives from it. Three DIFFERENT numbers, so a fit
+        # reading the wrong one of them moves every case in this class.
         e = {"dist_to_ma_pct": 0.5, "rsi": 48.0, "dryup": 0.8,
-             "pullback_vol_ratio": 0.45, "ud_ratio": 1.60,
+             "pullback_vol_ratio": 0.45,
+             "ud_ratio": 1.60, "ud_weighted": 1.30, "ud_20": 1.55,
              "retrace_of_52w_range_pct": 30.0}
         e.update(over)
         return e
@@ -1068,9 +1087,9 @@ class TestPullbackFit(unittest.TestCase):
         keys are floats in the same dict.
         """
         e = self.ev(retrace_of_52w_range_pct=30.0, retrace_pct=6.0)
-        self.assertAlmostEqual(setups.fit_pullback(e), 9.8, places=6)
+        self.assertAlmostEqual(setups.fit_pullback(e), 9.7, places=6)
         self.assertAlmostEqual(
-            setups.fit_pullback(dict(e, retrace_of_52w_range_pct=6.0)), 8.75,
+            setups.fit_pullback(dict(e, retrace_of_52w_range_pct=6.0)), 8.65,
             places=6)
 
     def test_closer_to_the_moving_average_scores_higher(self):
@@ -1111,36 +1130,39 @@ class TestPullbackFit(unittest.TestCase):
 
     def test_weights_are_thirty_twenty_twenty_five_fifteen_ten(self):
         """dist 0.5 -> 10, |rsi-50| = 2 -> 10, pullback volume 0.45 -> 10,
-        retrace 30 -> 10, accumulation 1.60 -> 8.
-        0.30*10 + 0.20*10 + 0.25*10 + 0.15*10 + 0.10*8
-          = 3.0 + 2.0 + 2.5 + 1.5 + 0.8 = 9.8.
+        retrace 30 -> 10, accumulation 7.0.
+        0.30*10 + 0.20*10 + 0.25*10 + 0.15*10 + 0.10*7
+          = 3.0 + 2.0 + 2.5 + 1.5 + 0.7 = 9.7.
         Each further case moves ONE term, so the individual weights and not just
-        their sum are pinned: dist 2.5 -> 6 costs 0.30*4 = 1.2, giving 8.6.
+        their sum are pinned: dist 2.5 -> 6 costs 0.30*4 = 1.2, giving 8.5.
         """
-        self.assertAlmostEqual(setups.fit_pullback(self.ev()), 9.8, places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=2.5)), 8.6,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev()), 9.7, places=6)
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=2.5)), 8.5,
                                places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=62.0)), 8.8,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=62.0)), 8.7,
                                places=6)
         self.assertAlmostEqual(setups.fit_pullback(self.ev(pullback_vol_ratio=0.9)),
-                               8.3, places=6)
+                               8.2, places=6)
         # 60% of the 52-week range is PAST the 55 boundary, so depth falls to
         # the 4 rung rather than the 7 one: 0.15 * 6 = 0.9 off.
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=60.0)), 8.9,
+        self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=60.0)), 8.8,
                                places=6)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=0.80)), 9.2,
-                               places=6)
+        # All three volume numbers together, so the whole term drops to its 2.0
+        # floor rather than half of it.
+        self.assertAlmostEqual(
+            setups.fit_pullback(self.ev(ud_ratio=0.80, ud_weighted=0.80,
+                                        ud_20=0.80)), 9.2, places=6)
 
     def test_every_distance_cut_is_reachable(self):
         cuts = [(1.0, 10), (2.0, 8), (3.0, 6)]
         for i, (dist, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=dist)),
-                                   round(0.30 * sub + 6.8, 2), places=6,
+                                   round(0.30 * sub + 6.7, 2), places=6,
                                    msg="at cut %s" % dist)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(dist_to_ma_pct=dist + 0.001)),
-                round(0.30 * above + 6.8, 2), places=6,
+                round(0.30 * above + 6.7, 2), places=6,
                 msg="just above cut %s" % dist)
 
     def test_distance_falls_through_to_zero_for_a_support_only_match(self):
@@ -1148,23 +1170,23 @@ class TestPullbackFit(unittest.TestCase):
         other fits: a name that qualified via the support route can sit 10%
         from every average."""
         self.assertAlmostEqual(setups.fit_pullback(self.ev(dist_to_ma_pct=10.1)),
-                               6.8, places=6)
+                               6.7, places=6)
 
     def test_every_rsi_cut_is_reachable(self):
         cuts = [(5.0, 10), (10.0, 8), (99.0, 5)]
         for i, (gap, sub) in enumerate(cuts):
             self.assertAlmostEqual(setups.fit_pullback(self.ev(rsi=50.0 + gap)),
-                                   round(3.0 + 0.20 * sub + 4.8, 2), places=6,
+                                   round(3.0 + 0.20 * sub + 4.7, 2), places=6,
                                    msg="at cut %s" % gap)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(rsi=50.0 + gap + 0.001)),
-                round(3.0 + 0.20 * above + 4.8, 2), places=6,
+                round(3.0 + 0.20 * above + 4.7, 2), places=6,
                 msg="just above cut %s" % gap)
 
     def test_every_pullback_volume_cut_is_reachable(self):
         """band_desc, so the paired case sits just ABOVE each cut. The 3.0 + 2.0
-        + 1.5 + 0.8 = 7.3 remainder is held fixed.
+        + 1.5 + 0.7 = 7.2 remainder is held fixed.
 
         The 0.0 fall-through below the last cut is NOT reachable through
         match_pullback -- its gate rejects anything above 0.90 -- so the final
@@ -1174,11 +1196,11 @@ class TestPullbackFit(unittest.TestCase):
         for i, (pv, sub) in enumerate(cuts):
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(pullback_vol_ratio=pv)),
-                round(0.25 * sub + 7.3, 2), places=6, msg="at cut %s" % pv)
+                round(0.25 * sub + 7.2, 2), places=6, msg="at cut %s" % pv)
             above = cuts[i + 1][1] if i + 1 < len(cuts) else 0.0
             self.assertAlmostEqual(
                 setups.fit_pullback(self.ev(pullback_vol_ratio=pv + 0.001)),
-                round(0.25 * above + 7.3, 2), places=6,
+                round(0.25 * above + 7.2, 2), places=6,
                 msg="just above cut %s" % pv)
 
     def test_every_accumulation_cut_is_reachable(self):
@@ -1192,15 +1214,23 @@ class TestPullbackFit(unittest.TestCase):
         """
         cuts = [(2.50, 10), (2.00, 9), (1.50, 8), (1.25, 6), (1.00, 4)]
         for i, (ud, sub) in enumerate(cuts):
-            self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=ud)),
-                                   round(0.10 * sub + 9.0, 2), places=6,
-                                   msg="at cut %s" % ud)
+            # Both ladders on the same rung and a steady trend, so the term is
+            # exactly that rung and the ladder is seen whole.
+            self.assertAlmostEqual(
+                setups.fit_pullback(self.ev(ud_ratio=ud, ud_weighted=ud,
+                                            ud_20=ud)),
+                round(0.10 * sub + 9.0, 2), places=6, msg="at cut %s" % ud)
             below = cuts[i + 1][1] if i + 1 < len(cuts) else 2.0
-            self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=ud - 0.001)),
-                                   round(0.10 * below + 9.0, 2), places=6,
-                                   msg="just below cut %s" % ud)
-        self.assertAlmostEqual(setups.fit_pullback(self.ev(ud_ratio=None)),
-                               round(0.10 * 2.0 + 9.0, 2), places=6)
+            lo = ud - 0.001
+            self.assertAlmostEqual(
+                setups.fit_pullback(self.ev(ud_ratio=lo, ud_weighted=lo,
+                                            ud_20=lo)),
+                round(0.10 * below + 9.0, 2), places=6,
+                msg="just below cut %s" % ud)
+        self.assertAlmostEqual(
+            setups.fit_pullback(self.ev(ud_ratio=None, ud_weighted=None,
+                                        ud_20=None)),
+            round(0.10 * 2.0 + 9.0, 2), places=6)
 
     def test_retrace_depth_ladder_has_six_reachable_arms(self):
         """The band falls away on BOTH sides of the 25-45 fib window now.
@@ -1215,7 +1245,7 @@ class TestPullbackFit(unittest.TestCase):
                          (38.2, 10), (45.0, 10), (45.01, 7), (55.0, 7),
                          (55.01, 4), (90.0, 4)]:
             self.assertAlmostEqual(setups.fit_pullback(self.ev(retrace_of_52w_range_pct=pct)),
-                                   round(8.3 + 0.15 * sub, 2), places=6,
+                                   round(8.2 + 0.15 * sub, 2), places=6,
                                    msg="retrace %s" % pct)
 
     def test_a_trivial_retracement_no_longer_scores_near_the_top(self):
@@ -1243,7 +1273,8 @@ class TestPullbackFit(unittest.TestCase):
         # 4, and accumulation, whose floor is 2:
         # 0.15*4 + 0.10*2 = 0.6 + 0.2 = 0.8.
         worst = self.ev(dist_to_ma_pct=50.0, rsi=200.0, pullback_vol_ratio=5.0,
-                        ud_ratio=0.5, retrace_of_52w_range_pct=99.0)
+                        ud_ratio=0.5, ud_weighted=0.5, ud_20=0.5,
+                        retrace_of_52w_range_pct=99.0)
         self.assertAlmostEqual(setups.fit_pullback(worst), 0.8, places=6)
         self.assertTrue(0.0 <= setups.fit_pullback(worst) <= 10.0)
 
@@ -1514,6 +1545,78 @@ class TestPullbackVolumeAgainstTheAdvance(unittest.TestCase):
         (label, (step, _)), = diag.items()
         self.assertIn("down-thrust", label)
         self.assertEqual(step, 11)
+
+
+class TestPullbackDistributionGate(unittest.TestCase):
+    """The unambiguous case only: BOTH new measures under the floor at once.
+
+    Two independent measurements have to agree that the name is being
+    distributed NOW before it is dropped. Either one alone is a finding the
+    table prints -- a `distribution-into-strength` name still matches -- and
+    only the doubly-confirmed case is excluded.
+    """
+
+    def match(self, **over):
+        strict = over.pop("_strict", False)
+        diag = over.pop("_diag", None)
+        return pull(result(), dict(CTX, **over), strict, diag)
+
+    def test_both_measures_below_the_floor_rejects(self):
+        self.assertIsNone(self.match(ud_weighted=0.90, ud_20=0.90))
+
+    def test_the_gate_is_live_in_this_predicate(self):
+        """The paired assertion. Without it, a gate that rejected EVERYTHING
+        would pass the test above and this file would never notice."""
+        self.assertIsNotNone(self.match())
+
+    def test_a_weak_close_weighted_ratio_alone_still_matches(self):
+        """distribution-into-strength: price drifts up, sellers own the close.
+        Surfaced with its label, never dropped."""
+        ev = self.match(ud_ratio=3.74, ud_weighted=0.59, ud_20=1.18)
+        self.assertIsNotNone(ev)
+        self.assertEqual(setups.volume_signal(3.74, 0.59),
+                         setups.DISTRIBUTION_INTO_STRENGTH)
+
+    def test_a_weak_twenty_day_ratio_alone_still_matches(self):
+        self.assertIsNotNone(self.match(ud_weighted=1.40, ud_20=0.50))
+
+    def test_the_floor_is_exclusive_on_both_arms(self):
+        """Exactly 1.0 is parity, not distribution. `<=` here would drop a name
+        whose buyers and sellers finished level."""
+        self.assertIsNotNone(self.match(ud_weighted=1.0, ud_20=0.90))
+        self.assertIsNotNone(self.match(ud_weighted=0.90, ud_20=1.0))
+        self.assertIsNone(self.match(ud_weighted=0.999, ud_20=0.999))
+
+    def test_an_unmeasurable_ratio_is_not_read_as_distribution(self):
+        """None means the series could not be judged -- for ud_weighted it means
+        NO bar closed below its own midpoint, the most bullish tape there is.
+        Two measures must both SAY distribution; one that says nothing does
+        not."""
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=0.50))
+        self.assertIsNotNone(self.match(ud_weighted=0.50, ud_20=None))
+        self.assertIsNotNone(self.match(ud_weighted=None, ud_20=None))
+
+    def test_a_measured_zero_is_read_as_distribution(self):
+        """0.0 is the strongest possible statement of it and must reject through
+        the comparison, not survive as if it were missing."""
+        self.assertIsNone(self.match(ud_weighted=0.0, ud_20=0.0))
+
+    def test_the_strict_arm_of_the_pair_is_the_one_strict_reads(self):
+        """Both halves are 1.0 today, so only a temporarily-tightened pair can
+        show that strict indexes element 1 and loosened element 0."""
+        orig = setups.DISTRIBUTION_FLOOR
+        setups.DISTRIBUTION_FLOOR = (1.0, 1.5)
+        try:
+            self.assertIsNotNone(self.match(ud_weighted=1.2, ud_20=1.2))
+            self.assertIsNone(self.match(ud_weighted=1.2, ud_20=1.2,
+                                         _strict=True))
+        finally:
+            setups.DISTRIBUTION_FLOOR = orig
+
+    def test_the_funnel_names_the_condition_a_passing_name_satisfies(self):
+        diag = {}
+        self.match(ud_weighted=0.90, ud_20=0.90, _diag=diag)
+        self.assertEqual(list(diag), [setups._distributing_label(False)])
 
 
 if __name__ == "__main__":

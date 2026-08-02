@@ -75,7 +75,7 @@ is precisely what `watchlist_analyser` is for.
 1.5:1 against a 1.5×ATR stop is capped and demoted, however good its chart. Trend and entry
 price are separate questions, and the whole toolkit is built to keep them separate.
 
-> **A note on test coverage.** Only `stock_screener` has a test suite (1054 tests). The other
+> **A note on test coverage.** Only `stock_screener` has a test suite (1234 tests). The other
 > three predate it and have none. That matters most for `analyze.py`: three skills import
 > it, so a regression there would propagate silently with nothing to catch it.
 
@@ -262,6 +262,14 @@ That same ratio is now a shared **accumulation** term inside every setup's Setup
 on a volume term of its own. Every other weight came down to make room, so Fit is still out
 of 10. Because CONFLUENCE ranks on mean Setup Fit, this changes CONFLUENCE ordering.
 
+**Two further measures qualify that ratio, and feed the same accumulation term.**
+`ud_weighted` weights each bar by *where it closed inside its own range* rather than against
+yesterday's close, so a day spent at the low is no longer booked as accumulation for closing a
+paisa up; `ud_20` runs the same ratio over 20 sessions, so a stock that was accumulated two
+months ago and distributed since no longer scores like one being bought today. A setup fails
+only when **both** read below 1.0 — one negative reading is a caution, two independent ones
+are a finding.
+
 **[Full writeup of each setup, with the market logic and exact thresholds →
 `docs/setups.md`](docs/setups.md)**
 
@@ -312,6 +320,23 @@ not, which makes it the most informative number in those rows.
 It reads `-` when the stock had no down-closes in the window to divide by — a dash is not a
 1.00 and must not be read as one.
 
+Two companion columns qualify it. `Volume Signal` reads the raw ratio against the
+close-weighted one, four ways — high and low being 1.25 on the raw ratio, the same floor
+LEADER and TURN gate on, and 1.0 on the close-weighted one: **both high** is genuine
+accumulation, price rising and closing strong (`accumulation`); **ratio high, weighted low**
+means price drifts up while sellers
+control the close — institutional supply being distributed into strength
+(`distribution-into-strength`); **ratio low, weighted high** means price is soft but buyers
+defend every dip, often a base forming (`supported`); **both low** is distribution,
+unambiguously (`distribution`). `Accumulation Trend` compares the 20-day ratio against the
+50-day — `strengthening` / `steady` / `flattening` / `fading` / `reversed` — so a number built
+mostly out of buying that stopped a month ago says so. Either column reads `unknown` when
+there was not enough volume history to classify the name.
+
+`distribution-into-strength` is the reading the screener previously could not produce at all:
+every price condition passed, the up/down ratio in the top decile, and supply being fed into
+the advance one strong-looking close at a time.
+
 ### Screener scores are catalyst-neutral
 
 Catalyst needs a news search per name, which is not feasible across 500 stocks, so every
@@ -334,9 +359,12 @@ rows, so a seventh setup added later costs zero new columns. `setups_matched` an
 a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"` — because
 a file that needs string-stripping before a column can be sorted is not a data file.
 
-27 columns. `ud_ratio` sits immediately after `rs_3m`, alongside the other per-symbol
-metrics rather than in an evidence slot, and is written on every row including CONFLUENCE.
-An unmeasurable ratio is an empty cell, never a `1.00`.
+31 columns, up from 27. `ud_ratio` sits immediately after `rs_3m`, alongside the other
+per-symbol metrics rather than in an evidence slot, and is written on every row including
+CONFLUENCE. An unmeasurable ratio is an empty cell, never a `1.00`. The four columns added
+with it are the two new numbers and the two labels derived from them — `ud_weighted`, `ud_20`,
+`volume_signal` and `accumulation_trend` — so the file keeps the inputs, not just the verdict,
+and a spreadsheet can re-cut the four-way reading itself.
 
 The file keeps the top 20 of each setup's ranking, so a full scan writes at most 120 rows.
 The fortieth name in a 45-name LEADER table cleared the gate and nothing more; keeping it
@@ -364,7 +392,7 @@ stock_screener/
   screener.py     parallel scan, ranking, rendering, CLI
   csv_export.py   long-format CSV export: row building and file I/O
   nifty500.txt    500 symbols with sectors, refreshable from NSE
-  tests/          1054 tests
+  tests/          1234 tests
 
 stock_analyser/   analyze.py (the scoring engine), levels.py (nine-method S/R)
 watchlist_analyser/  watchlist.py (comparative scoring, relative strength)
@@ -398,7 +426,7 @@ India coverage. They silently rewrite the exchange, return no data, and then rep
 cd stock_screener && python3 -m unittest discover -s tests
 ```
 
-1054 tests, no third-party test runner. Beyond the usual coverage, the suite is
+1234 tests, no third-party test runner. Beyond the usual coverage, the suite is
 **mutation-verified**: for each assertion, a deliberately wrong implementation was patched
 in and the test confirmed to fail. That practice exists because it caught things ordinary
 testing did not — including a predicate that could never match while all of its tests
