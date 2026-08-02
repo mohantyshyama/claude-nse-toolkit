@@ -6,6 +6,7 @@ happens to look right in memory.
 """
 import csv as csvmod
 import contextlib
+import datetime as dt
 import io
 import os
 import sys
@@ -190,10 +191,100 @@ class TestBuildRows(unittest.TestCase):
         rows = build([scanned()], {"LEADER": [result()]}, ["LEADER"],
                      scan_date="2026-08-02", last_closed_bar="2026-07-31",
                      universe="nifty500", mode="strict")
-        self.assertEqual(rows[0]["scan_date"], "2026-08-02")
-        self.assertEqual(rows[0]["last_closed_bar"], "2026-07-31")
+        self.assertEqual(rows[0]["scan_date"], "02-Aug-2026")
+        self.assertEqual(rows[0]["last_closed_bar"], "31-Jul-2026")
         self.assertEqual(rows[0]["universe"], "nifty500")
         self.assertEqual(rows[0]["mode"], "strict")
+
+
+class TestDateCells(unittest.TestCase):
+    """Dates in the file are `02-Aug-2026`, not `2026-08-02`.
+
+    Excel converts an ISO date to its internal serial on import and renders the
+    cell as a bare number -- 46236 -- so the column the user opens has no date
+    in it at all.
+    """
+
+    def test_an_iso_string_becomes_day_month_year(self):
+        self.assertEqual(csv_export.date_cell("2026-08-02"), "02-Aug-2026")
+
+    def test_the_day_is_zero_padded_and_the_month_is_alphabetic(self):
+        """`2-8-2026` would be ambiguous and `02-08-2026` reads as 8 February
+        in half the world. The month has to be letters."""
+        got = csv_export.date_cell("2026-02-08")
+        self.assertEqual(got, "08-Feb-2026")
+        self.assertNotIn("02", got.split("-")[1])
+
+    def test_a_date_object_is_formatted_too(self):
+        """screener passes o["last_closed_bar"]["t"], which analyze.fetch may
+        hand back as a datetime.date rather than a string."""
+        self.assertEqual(csv_export.date_cell(dt.date(2026, 8, 2)),
+                         "02-Aug-2026")
+        self.assertEqual(csv_export.date_cell(dt.datetime(2026, 8, 2, 15, 30)),
+                         "02-Aug-2026")
+
+    def test_a_timestamped_iso_string_keeps_only_the_date(self):
+        self.assertEqual(csv_export.date_cell("2026-08-02 15:30:00"),
+                         "02-Aug-2026")
+
+    def test_a_non_date_is_passed_through_rather_than_blanked(self):
+        """`n/a` is what main() stamps when a scan produced no rows at all.
+        Blanking it would turn "we could not tell" into "there was none"."""
+        self.assertEqual(csv_export.date_cell("n/a"), "n/a")
+
+    def test_empty_and_missing_stay_empty(self):
+        self.assertEqual(csv_export.date_cell(None), "")
+        self.assertEqual(csv_export.date_cell(""), "")
+
+    def test_every_month_round_trips(self):
+        """Twelve months, so no single-month fixture can hide a format that
+        only works for August."""
+        for m in range(1, 13):
+            d = dt.date(2026, m, 15)
+            self.assertEqual(csv_export.date_cell(d.isoformat()),
+                             d.strftime("%d-%b-%Y"), str(m))
+
+    def test_the_column_no_longer_parses_as_an_iso_date(self):
+        """The failure mode itself: a cell Excel would turn into a serial."""
+        with self.assertRaises(ValueError):
+            dt.datetime.strptime(csv_export.date_cell("2026-08-02"),
+                                 "%Y-%m-%d")
+
+    def test_the_default_filename_stays_iso_so_a_directory_sorts_by_date(self):
+        """The deliberate split. `scans/scan_02-Aug-2026.csv` would sort next
+        to `scan_02-Sep-2025.csv`, which is the whole reason the filename is
+        not given the same treatment as the columns."""
+        path = csv_export.default_path("2026-08-02")
+        self.assertIn("scan_2026-08-02.csv", path)
+        self.assertNotIn("Aug", path)
+        names = sorted(csv_export.default_path(d) for d in
+                       ("2026-08-02", "2025-09-02", "2026-01-15"))
+        self.assertEqual([os.path.basename(n) for n in names],
+                         ["scan_2025-09-02.csv", "scan_2026-01-15.csv",
+                          "scan_2026-08-02.csv"])
+
+    def test_the_file_and_the_filename_disagree_on_purpose(self):
+        """Pinned together so neither can be "fixed" into the other by someone
+        who sees only one of them."""
+        rows = build([scanned()], {"LEADER": [result()]}, ["LEADER"],
+                     scan_date="2026-08-02")
+        self.assertEqual(rows[0]["scan_date"], "02-Aug-2026")
+        self.assertIn("2026-08-02",
+                      csv_export.resolve_path(csv_export.DEFAULT_PATH,
+                                              "2026-08-02"))
+
+    def test_the_formatted_date_survives_into_the_file_unquoted(self):
+        with tmpdir() as d:
+            path = os.path.join(d, "out.csv")
+            csv_export.write_csv(path, build([scanned()],
+                                             {"LEADER": [result()]}, ["LEADER"],
+                                             scan_date="2026-08-02",
+                                             last_closed_bar="2026-07-31"))
+            body = raw_lines(path)[1]
+            self.assertTrue(body.startswith("02-Aug-2026,31-Jul-2026,"), body)
+            back = read_back(path)[0]
+            self.assertEqual(back["scan_date"], "02-Aug-2026")
+            self.assertEqual(back["last_closed_bar"], "31-Jul-2026")
 
     def test_one_row_per_symbol_setup_pair(self):
         scan_rows = [scanned("TCS", ("COILED", "LEADER"))]
@@ -278,6 +369,25 @@ class TestBuildRows(unittest.TestCase):
                      ["LEADER", "TURN"])
         self.assertEqual([r["setup"] for r in rows], ["LEADER"])
 
+    def test_the_cap_is_enforced_where_the_rows_are_built(self):
+        """Not only through main(): any caller of build_rows gets the cap, so a
+        second export path cannot reintroduce an uncapped file."""
+        syms = ["S%02d" % i for i in range(30)]
+        rows = build([scanned(s) for s in syms],
+                     {"LEADER": [result(s) for s in syms]}, ["LEADER"])
+        self.assertEqual(len(rows), csv_export.MAX_ROWS_PER_SETUP)
+        self.assertEqual([r["symbol"] for r in rows],
+                         syms[:csv_export.MAX_ROWS_PER_SETUP])
+        self.assertEqual([r["rank"] for r in rows],
+                         list(range(1, csv_export.MAX_ROWS_PER_SETUP + 1)))
+
+    def test_a_setup_at_exactly_the_cap_keeps_every_row(self):
+        """The `<=` edge of the slice: 20 in, 20 out, nothing dropped."""
+        syms = ["S%02d" % i for i in range(csv_export.MAX_ROWS_PER_SETUP)]
+        rows = build([scanned(s) for s in syms],
+                     {"LEADER": [result(s) for s in syms]}, ["LEADER"])
+        self.assertEqual([r["symbol"] for r in rows], syms)
+
     def test_a_chosen_setup_absent_from_the_map_contributes_no_rows(self):
         rows = build([scanned("A")], {"LEADER": [result("A")]},
                      ["LEADER", "PULLBACK"])
@@ -334,12 +444,45 @@ class TestEvidenceColumns(unittest.TestCase):
         self.assertIn('"full_stack"', src)
         self.assertIn('"pct_from_high"', src)
 
-    def test_pullback_emits_distance_to_average_and_rsi_at_three_places(self):
-        r = self._row("PULLBACK", {"dist_to_ma_pct": 1.23456, "rsi": 52.9579})
+    def test_pullback_emits_the_reversal_bar_and_the_swing_retracement(self):
+        """The pair that carries the signal since the reversal gate landed.
+
+        Distance to an average and RSI both sat inside the entry gate already
+        and neither could separate a stock that turned at support from one still
+        falling into it.
+        """
+        r = self._row("PULLBACK", {"dist_to_ma_pct": 1.23456, "rsi": 52.9579,
+                                   "close_position": 0.73578,
+                                   "retrace_pct": 17.0567,
+                                   "retrace_of_52w_range_pct": 33.0})
         self.assertEqual((r["evidence_1_label"], r["evidence_1_value"]),
-                         ("dist_to_ma_pct", 1.235))
+                         ("close_position", 0.736))
         self.assertEqual((r["evidence_2_label"], r["evidence_2_value"]),
-                         ("rsi", 52.958))
+                         ("retrace_pct", 17.057))
+
+    def test_pullback_close_position_stays_a_fraction_in_the_file(self):
+        """The terminal prints 74%; the file keeps 0.736, like pos_in_base."""
+        r = self._row("PULLBACK", {"close_position": 0.73578,
+                                   "retrace_pct": 17.0567})
+        self.assertNotIsInstance(r["evidence_1_value"], str)
+        self.assertLess(r["evidence_1_value"], 1.0)
+
+    def test_pullback_publishes_the_swing_retracement_not_the_range_share(self):
+        """The two are different numbers on different scales and the file must
+        carry the one the gate uses. 17.06% under a swing high and 33% of the
+        52-week range are both true of the same name."""
+        r = self._row("PULLBACK", {"close_position": 0.74,
+                                   "retrace_pct": 17.0567,
+                                   "retrace_of_52w_range_pct": 33.0})
+        self.assertEqual(r["evidence_2_value"], 17.057)
+
+    def test_pullback_evidence_keys_exist_on_the_real_predicates_output(self):
+        """Pins the export to match_pullback's actual evidence dict, so renaming
+        a key there cannot silently blank a column here."""
+        import inspect
+        src = inspect.getsource(setups.match_pullback)
+        self.assertIn('"close_position"', src)
+        self.assertIn('"retrace_pct"', src)
 
     def test_turn_emits_bars_since_cross_and_the_macd_histogram(self):
         r = self._row("TURN", {"bars_since_cross": 12, "macd_hist": 1.23456})
@@ -703,7 +846,15 @@ class TestMainCsv(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "scans")))
             self.assertIn(path, err)
 
-    def test_top_truncates_the_terminal_but_never_the_file(self):
+    def test_top_governs_the_terminal_and_the_file_has_its_own_cap(self):
+        """Two independent limits, and this pins that they are independent.
+
+        This test used to assert that the file was never truncated at all. That
+        is no longer the contract: --top still governs the terminal alone, and
+        the file is capped at MAX_ROWS_PER_SETUP whatever --top says. With four
+        matches, --top 2 shows two on screen and the file -- well under its own
+        cap -- still holds all four.
+        """
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             rc, out, _ = run_main(["--setup", "leader", "--top", "2",
@@ -713,6 +864,61 @@ class TestMainCsv(unittest.TestCase):
             rows = read_back(path)
             self.assertEqual(len(rows), 4)
             self.assertEqual([r["rank"] for r in rows], ["1", "2", "3", "4"])
+
+    def test_the_file_keeps_twenty_rows_per_setup_and_no_more(self):
+        """31 matches, and the file holds the top 20 with contiguous ranks."""
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            rc, _, err = run_main(["--setup", "leader", "--top", "5",
+                                   "--csv", path], self._rows(31))
+            self.assertEqual(rc, 0)
+            rows = read_back(path)
+            self.assertEqual(len(rows), 20)
+            self.assertEqual([int(r["rank"]) for r in rows],
+                             list(range(1, 21)))
+            self.assertIn("wrote 20 rows", err)
+
+    def test_the_rows_kept_are_the_TOP_of_the_ranking(self):
+        """A cap that dropped the wrong twenty would still count to twenty.
+        _rows(n) scores SYM0 highest and descends, so the survivors are named."""
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader", "--csv", path], self._rows(25))
+            self.assertEqual([r["symbol"] for r in read_back(path)],
+                             ["SYM%d" % i for i in range(20)])
+
+    def test_a_high_top_does_not_lift_the_file_cap(self):
+        """--top clamps at 20 itself, so this also pins that the two limits are
+        not secretly the same number arriving by a different route: --top 20
+        with 31 matches still writes 20, and would write 20 at --top 1 too."""
+        for top in ("1", "20"):
+            with tmpdir() as d:
+                path = os.path.join(d, "o.csv")
+                run_main(["--setup", "leader", "--top", top, "--csv", path],
+                         self._rows(31))
+                self.assertEqual(len(read_back(path)), 20, "--top %s" % top)
+
+    def test_the_cap_is_applied_per_setup_not_to_the_whole_file(self):
+        """Two setups over the cap write 40 rows, not 20."""
+        rows = [scan_row("SYM%d" % i, total=9.0 - i * 0.1, matched={
+            "LEADER": {"fit": 8.0, "evidence": dict(LEADER_EV)},
+            "COILED": {"fit": 7.0, "evidence": dict(COILED_EV)}})
+            for i in range(25)]
+        with tmpdir() as d:
+            path = os.path.join(d, "o.csv")
+            run_main(["--setup", "leader,coiled", "--csv", path], rows)
+            back = read_back(path)
+            self.assertEqual(len(back), 40)
+            for name in ("COILED", "LEADER"):
+                self.assertEqual(
+                    [int(r["rank"]) for r in back if r["setup"] == name],
+                    list(range(1, 21)), name)
+
+    def test_a_full_scan_writes_at_most_a_hundred_and_twenty_rows(self):
+        """Six setups at twenty each. The arithmetic, taken off the code."""
+        self.assertEqual(csv_export.MAX_ROWS_PER_SETUP, 20)
+        self.assertEqual(len(csv_export.EVIDENCE)
+                         * csv_export.MAX_ROWS_PER_SETUP, 120)
 
     def test_rank_reproduces_the_terminal_order_exactly(self):
         with tmpdir() as d:
@@ -830,10 +1036,24 @@ class TestMainCsv(unittest.TestCase):
             self.assertEqual(back["LEADER"]["setups_matched"], "COILED|LEADER")
 
     def test_the_file_carries_the_scans_own_last_closed_bar(self):
+        """...and prints it as a date a spreadsheet will not turn into 46234."""
         with tmpdir() as d:
             path = os.path.join(d, "o.csv")
             run_main(["--setup", "leader", "--csv", path], self._rows(1))
-            self.assertEqual(read_back(path)[0]["last_closed_bar"], "2026-07-31")
+            self.assertEqual(read_back(path)[0]["last_closed_bar"], "31-Jul-2026")
+
+    def test_the_scan_date_column_is_formatted_while_the_filename_is_not(self):
+        """End to end through main(): the bare --csv flag names the file with
+        today's ISO date and stamps the column with today's DD-MMM-YYYY."""
+        import datetime as _dt
+        today = _dt.date.today()
+        with tmpdir() as d, chdir(d):
+            run_main(["--setup", "leader", "--csv"], self._rows(1))
+            path = os.path.join(".", "scans",
+                                "scan_%s.csv" % today.isoformat())
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(read_back(path)[0]["scan_date"],
+                             today.strftime("%d-%b-%Y"))
 
 
 class TestLiveSmoke(unittest.TestCase):
@@ -868,11 +1088,16 @@ class TestLiveSmoke(unittest.TestCase):
             self.assertTrue(sum(counts.values()) > 0,
                             "nothing matched anywhere in the universe -- this "
                             "smoke test cannot say anything today")
-            self.assertEqual(len(rows), sum(counts.values()))
+            cap = csv_export.MAX_ROWS_PER_SETUP
+            expected = sum(min(n, cap) for n in counts.values())
+            self.assertEqual(len(rows), expected)
+            self.assertLessEqual(len(rows), cap * len(counts))
             for name, n in counts.items():
                 ranks = [int(r["rank"]) for r in rows if r["setup"] == name]
-                # Contiguous 1..n: the file holds every match, not the top 5.
-                self.assertEqual(ranks, list(range(1, n + 1)), name)
+                # Contiguous 1..min(n, cap): the file holds the TOP of each
+                # ranking, not the --top 5 the terminal showed and not an
+                # arbitrary slice out of the middle.
+                self.assertEqual(ranks, list(range(1, min(n, cap) + 1)), name)
 
             all_setups = list(setups.SETUPS) + ["CONFLUENCE"]
             for r in rows:

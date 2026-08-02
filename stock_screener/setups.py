@@ -137,6 +137,10 @@ THRESHOLDS = {
                "strict_ma_stack": (False, True)},
     "PULLBACK": {"ma_dist_pct": (3.0, 2.0), "atr_mult_to_support": (1.2, 1.0),
                  "swing_margin_atr": (1.0, 1.5),
+                 "min_retrace_pct": (3.0, 5.0),
+                 "support_tol_atr": (0.25, 0.10),
+                 "close_position": (0.50, 0.60),
+                 "reversal_bars": (2, 1),
                  "rsi_lo": (38.0, 40.0), "rsi_hi": (62.0, 58.0),
                  "dryup": (1.1, 1.0), "thrust_bars": (8, 10)},
     "TURN": {"cross_bars": (45, 30), "rsi_lo": (48.0, 50.0),
@@ -532,6 +536,111 @@ def _below_recent_swing_high(o, px, atr_d, mult):
     return px <= max(swings) - mult * atr_d
 
 
+# How many of compute()'s swing highs the RETRACEMENT is measured from. FIVE --
+# not one, and not all ten:
+#
+#   * one pivot is wrong in the direction that matters. A stock still falling
+#     prints a fresh lower pivot on every bounce, so the LATEST swing high sits
+#     just above the price and a name in a decline reads as "0.4% off its swing
+#     high" -- the opposite of the truth, and precisely the reading that would
+#     have let a falling name through this gate.
+#   * all ten reaches back a year or more on a slow-moving name. The level a
+#     retracement is measured from would then be a high the stock left three
+#     legs ago, which says nothing about the move being screened, and the
+#     percentage would grow simply with the length of the history.
+#
+# Five is the current leg plus enough behind it to contain the high that leg
+# started from. On every name in the live universe the last five and the last
+# ten agree, so the number is not load-bearing today -- it is a bound on how far
+# back a stale high can be dragged in on the day one day disagrees.
+RETRACE_SWINGS = 5
+
+
+def _retrace_from_swing_high(o, px):
+    """How far below a recent swing high `px` sits, in percent.
+
+    Returns None when there is no swing to measure against, or when the pivot
+    price is not positive -- "cannot judge", which the caller must treat as a
+    rejection and never as a pass.
+    """
+    swings = [s.get("px") for s in (o.get("swing_highs") or []) if s.get("px")]
+    if not swings:
+        return None
+    hi = max(swings[-RETRACE_SWINGS:])
+    if hi <= 0:
+        return None
+    return (hi - px) / hi * 100
+
+
+def _close_position(bar):
+    """Where the close sat inside the bar's own range: 0.0 at the low, 1.0 at
+    the high.
+
+    None on a zero-range bar, where the question has no answer. Not 0.0 and not
+    1.0 -- either would let a bar carrying no information decide the gate, and a
+    synthetic h == l bar is exactly the fixture that would then pass silently.
+    """
+    span = bar["h"] - bar["l"]
+    if span <= 0:
+        return None
+    return (bar["c"] - bar["l"]) / span
+
+
+def _rejection_at_support(o, ctx, strict):
+    """The close position of the bar that rejected support, or None.
+
+    A pullback that has not yet turned is a stock still falling. NH closed at
+    22% of its daily range and MARICO at 13% -- both near the low, both counted
+    as pullbacks by a screen that never asked whether a buyer had appeared.
+
+    A bar qualifies on a candidate level L when ALL THREE hold:
+
+        tested it     bar low <= L + tol * ATR   (it actually reached support)
+        reclaimed it  bar close > L              (it did not close under it)
+        closed strong close position >= floor    (buyers took the bar back)
+
+    All three, on the SAME level: a low that reached the 50-day and a close
+    above the 20-day is not a rejection of anything.
+
+    The candidate levels are the 20-day, the 50-day and the engine's nearest
+    support, each kept only when it sits at or below the last closed price --
+    a level ABOVE the price is resistance, and "reclaiming" it would mean the
+    stock is under it, which is not this setup.
+
+    The bar may be the last closed one or the one before it (loosened), or the
+    last closed one alone (strict): the turn is often confirmed by an inside day
+    that closes mid-range, and demanding the hammer itself be the final bar
+    throws away the second day of every genuine reversal. CEMPRO is the live
+    case -- its hammer is the 30th, and the 31st closed strong but no longer
+    reached back to the 50-day.
+
+    Returns None when there is no ATR, no candidate level or no qualifying bar.
+    """
+    atr_d = o["atr"]["daily"]
+    if not atr_d:
+        return None
+    px = o["price"]
+    levels = [lv for lv in (o["ma"].get("sma20"), o["ma"].get("sma50"),
+                            (o.get("entry_gate") or {}).get("nearest_support"))
+              if lv is not None and lv <= px]
+    if not levels:
+        return None
+
+    tol = T("PULLBACK", "support_tol_atr", strict) * atr_d
+    floor = T("PULLBACK", "close_position", strict)
+    window = T("PULLBACK", "reversal_bars", strict)
+    # Most recent first, so the evidence reports the freshest qualifying bar
+    # when both are eligible.
+    for bar in reversed((ctx.get("rows") or [])[-window:]):
+        pos = _close_position(bar)
+        if pos is None or pos < floor:
+            continue
+        for lv in levels:
+            if bar["l"] <= lv + tol and bar["c"] > lv:
+                return pos
+    return None
+
+
 def match_pullback(o, ctx, strict=False, diag=None):
     """Retracement into support inside an established uptrend. Spec section 3.4."""
     ma, px, gate = o["ma"], o["price"], o["entry_gate"]
@@ -581,25 +690,61 @@ def match_pullback(o, ctx, strict=False, diag=None):
     if px <= ma["sma50"] * 0.97:
         return _reject(diag, 6, "price no more than 3% below the 50-day average")
 
+    # A pullback has to have PULLED BACK. Nothing above says so: the swing-margin
+    # guard applies to the support arm alone, and the moving-average arm asks
+    # only that price sit near the 20- or 50-day -- which a stock going sideways
+    # satisfies when the average catches UP to it. MARICO closed 0.3% under its
+    # swing high and matched on exactly that; NH at 1.0%. Neither had retraced;
+    # their averages had simply arrived.
+    #
+    # Applied to BOTH arms, because both were open to the same defect.
+    retrace = _retrace_from_swing_high(o, px)
+    if retrace is None or retrace < T("PULLBACK", "min_retrace_pct", strict):
+        return _reject(diag, 7, "price at least %.0f%% below a recent swing high"
+                       % T("PULLBACK", "min_retrace_pct", strict))
+
+    # ...and the pullback has to be ENDING. A retracement with no turn in it is
+    # a stock still falling: NH closed at 22% of its daily range and MARICO at
+    # 13%, both near the low, and both were counted. See _rejection_at_support.
+    close_pos = _rejection_at_support(o, ctx, strict)
+    if close_pos is None:
+        return _reject(diag, 8, "a bar that tested support, closed back above it "
+                                "and closed in the top %.0f%% of its own range"
+                       % round((1 - T("PULLBACK", "close_position", strict)) * 100))
+
     r = o["rsi"]["daily"]
     if r is None or not (T("PULLBACK", "rsi_lo", strict) <= r
                          <= T("PULLBACK", "rsi_hi", strict)):
-        return _reject(diag, 7, "a daily RSI between %.0f and %.0f"
+        return _reject(diag, 9, "a daily RSI between %.0f and %.0f"
                        % (T("PULLBACK", "rsi_lo", strict),
                           T("PULLBACK", "rsi_hi", strict)))
 
     dryup = o["volume"]["dryup_ratio"]
     if dryup is None or dryup >= T("PULLBACK", "dryup", strict):
-        return _reject(diag, 8, "volume dried up below %.2fx its own average"
+        return _reject(diag, 10, "volume dried up below %.2fx its own average"
                        % T("PULLBACK", "dryup", strict))
     if not _no_down_thrust(o, T("PULLBACK", "thrust_bars", strict)):
-        return _reject(diag, 9, "no down-thrust in the last %d sessions"
+        return _reject(diag, 11, "no down-thrust in the last %d sessions"
                        % T("PULLBACK", "thrust_bars", strict))
 
+    # TWO retracement numbers, deliberately, because they answer two questions
+    # and neither substitutes for the other:
+    #
+    #   retrace_pct              how far under a recent swing high price sits.
+    #                            The gate above, and the number the report
+    #                            publishes -- it is what "has it pulled back"
+    #                            means to a reader looking at one name.
+    #   retrace_of_52w_range_pct where the retracement sits inside the 52-week
+    #                            range. fit_pullback scores THIS one, against a
+    #                            band calibrated to the 38.2% fib zone of a
+    #                            year's range. Feeding it the swing-high
+    #                            percentage would put every match in the band's
+    #                            bottom rung, since the gate only asks for 3%.
     span = o["hi52"] - o["lo52"]
-    retrace = (o["hi52"] - px) / span * 100 if span else 0.0
     return {"dist_to_ma_pct": near_ma, "rsi": r, "dryup": dryup,
-            "retrace_pct": retrace}
+            "close_position": close_pos, "retrace_pct": retrace,
+            "retrace_of_52w_range_pct": (o["hi52"] - px) / span * 100
+                                        if span else 0.0}
 
 
 def retrace_depth(x):
@@ -633,12 +778,17 @@ def retrace_depth(x):
 
 
 def fit_pullback(ev):
-    """Distance to MA 35% / RSI near 50 25% / dry-up 20% / retrace depth 20%."""
+    """Distance to MA 35% / RSI near 50 25% / dry-up 20% / retrace depth 20%.
+
+    The depth term reads retrace_of_52w_range_pct, NOT retrace_pct: retrace_depth
+    bands a share of the 52-week range, and the swing-high percentage the gate
+    uses lives on a different scale entirely.
+    """
     d = band_desc(ev["dist_to_ma_pct"], [(1.0, 10), (2.0, 8), (3.0, 6)])
     r = band_desc(abs(ev["rsi"] - 50.0), [(5.0, 10), (10.0, 8), (99.0, 5)])
     v = band_desc(ev["dryup"], [(0.80, 10), (0.95, 8), (1.10, 5)])
     return round(0.35 * d + 0.25 * r + 0.20 * v
-                 + 0.20 * retrace_depth(ev["retrace_pct"]), 2)
+                 + 0.20 * retrace_depth(ev["retrace_of_52w_range_pct"]), 2)
 
 
 # ---------------------------------------------------------------------- TURN

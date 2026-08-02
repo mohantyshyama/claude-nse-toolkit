@@ -168,10 +168,14 @@ EVIDENCE_COLUMNS = {
     "LEADER": [("Percent From 52-Week High",
                 lambda r: _n(r["evidence"]["pct_from_high"], "{:.1f}%")),
                ("Relative Strength (1-month)", lambda r: _n(r["rs_1m"], "{:+.1f}"))],
-    "PULLBACK": [("Distance to 20-Day or 50-Day Average",
-                  lambda r: _n(r["evidence"]["dist_to_ma_pct"], "{:.1f}%")),
-                 ("Relative Strength Index (daily)",
-                  lambda r: _n(r["evidence"]["rsi"], "{:.0f}"))],
+    # The pair that now CARRIES the signal. Distance to an average and RSI both
+    # sat inside the entry gate already, and neither could tell a stock that had
+    # turned at support from one still falling into it: NH matched at 22% of its
+    # daily range and MARICO at 13%, both with unremarkable distances and RSIs.
+    "PULLBACK": [("Close Position in Reversal Bar",
+                  lambda r: _n(r["evidence"]["close_position"], "{:.0%}")),
+                 ("Percent Below Recent Swing High",
+                  lambda r: _n(r["evidence"]["retrace_pct"], "{:.1f}%"))],
     "TURN": [("Bars Since Cross",
               lambda r: _n(r["evidence"]["bars_since_cross"], "{:.0f}")),
              ("Moving Average Convergence Divergence Histogram",

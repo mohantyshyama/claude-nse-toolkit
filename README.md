@@ -72,7 +72,7 @@ tightening)  way)         leads)       CONFLUENCE: two or more of the above
 | **COILED** | Volatility contracting inside a base, before the move | Score at Trigger |
 | **BREAKOUT** | The base giving way on volume, the day it fires | Score Now |
 | **LEADER** | Established leadership near 52-week highs, not yet exhausted | Score Now |
-| **PULLBACK** | An established uptrend resting into support | Score Now |
+| **PULLBACK** | An uptrend resting into support, and turning back up | Score Now |
 | **TURN** | The early part of a confirmed new trend | Score at Trigger |
 | **CONFLUENCE** | Names matching two or more of the above | Match count |
 
@@ -128,7 +128,7 @@ candidates; adjudication happens one level down.
 When nothing matches, the output names the condition that rejected the field rather than
 reporting a bare zero. The screener will not pad a list to fill 15 rows.
 
-### The CSV is long format, and `--top` does not touch it
+### The CSV is long format, capped at 20 rows per setup
 
 `--csv` writes one row per (symbol, setup) pair: a stock matching three setups gets three
 rows, so a seventh setup added later costs zero new columns. `setups_matched` and
@@ -136,8 +136,18 @@ rows, so a seventh setup added later costs zero new columns. `setups_matched` an
 a join. Every value is a raw number — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"` — because
 a file that needs string-stripping before a column can be sorted is not a data file.
 
-`--top` governs terminal readability only. The file holds every match, and the `rank`
-column preserves the on-screen order, so `rank <= 15` reproduces the printed table exactly.
+The file keeps the top 20 of each setup's ranking, so a full scan writes at most 120 rows.
+The fortieth name in a 45-name LEADER table cleared the gate and nothing more; keeping it
+made the file look like a data set when it is a shortlist. `--top` is a separate limit and
+governs the terminal alone — it never reaches the file. The `rank` column preserves the
+on-screen order and stays contiguous `1..20`, so `rank <= 15` reproduces the printed table
+exactly.
+
+Dates in the file read `02-Aug-2026`, not `2026-08-02`, because Excel converts an ISO date
+to its internal serial and renders the cell as a bare number. The default *filename* stays
+ISO — `scans/scan_2026-08-02.csv` — so a directory of scans lists chronologically. The two
+formats serve a spreadsheet cell and a directory listing, and neither is right for both.
+
 `--append` writes the header only when the file is new or empty, and the `mode` column
 records `strict` or `loosened` so two differently-thresholded scans cannot be read as one.
 

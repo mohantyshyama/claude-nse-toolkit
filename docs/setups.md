@@ -158,16 +158,27 @@ early version of the same idea.
 
 ---
 
-## PULLBACK — an established uptrend resting
+## PULLBACK — an uptrend resting, and turning back up
 
-**What it looks for:** a stock in an intact uptrend that has retraced into support — either
-to its 20- or 50-day average, or into a structural support zone — with momentum cooled and
-volume drying up.
+**What it looks for:** a stock in an intact uptrend that has genuinely retraced from a
+recent swing high, come back to support — its 20- or 50-day average, or a structural
+support zone — and then printed a bar showing the retracement is *ending*: it reached that
+support, closed back above it, and closed in the top of its own range.
 
 **Why it works.** This is the setup with the best risk-reward arithmetic available, because
 it is the only one where you buy *into* weakness inside strength. Support is close, so the
 stop is tight; the prior high is a natural target, so reward is defined. The other setups
 mostly ask you to buy strength, which means a wider stop by construction.
+
+But that arithmetic only holds if the pullback is over. Buying a stock still falling into
+support gets you the tight stop and the falling stock — the stop is close precisely because
+the level is close, and price is heading through it. So the setup no longer asks only
+"has this stock come back to support"; it asks **"has it come back to support and started
+to turn"**. The reversal bar is the evidence. A hammer at the 50-day, a close in the upper
+half of a wide range, a level reclaimed after being probed — those are a seller exhausted
+and a buyer showing up, on the same bar, at the level that matters. Without one, the two
+facts the old version relied on (near an average, momentum cooled) are equally true of a
+stock on its way down through both.
 
 **The condition that defines this setup — and that is deliberately not loosened — is that
 the 200-day average must be rising.** That single test is what separates "a pullback in an
@@ -182,16 +193,45 @@ value. This one does not.
 | — or | within **1.2× ATR** of structural support | within **1.0× ATR** |
 | Support-arm guard | **and** at least **1.0× ATR** below a recent swing high | **1.5× ATR** |
 | Not broken | price above 50-day × 0.97 | same |
+| **Retracement** | **≥ 3%** below the highest of the last 5 swing highs | **≥ 5%** |
+| **Reversal — tested** | bar low within **0.25× ATR** of a support level | **0.10× ATR** |
+| **Reversal — reclaimed** | bar close above **that same** level | same |
+| **Reversal — closed strong** | close in the top **50%** of the bar's range | top **40%** |
+| **Reversal — recency** | the last closed bar **or the one before it** | last closed bar only |
 | Momentum | RSI 38–62 | RSI 40–58 |
 | Volume | 20-day average / 50-day average < 1.1 | < 1.0 |
 | Distribution | no down-thrust in last 8 bars | 10 bars |
 
-**The swing-high guard on the support arm exists because of a real failure.** Without it, a
-stock closing +4.3% at a *new high* qualified as a pullback — it was near a support zone
-in absolute terms, and the support arm never checked whether the stock had actually pulled
-back from anything. A pullback must have something to pull back from.
+**Both new conditions exist because of real failures, measured on live data.**
 
-**Evidence columns:** `Distance to 20-Day or 50-Day Average` and `RSI (daily)`.
+*Nothing required a retracement.* MARICO sat 0.3% under its swing high and matched — it had
+gone sideways while its 20-day average rose *into* it, which satisfies "within 3% of the
+20-day" without a retracement ever happening. NH matched at 1.0%. The swing-high guard that
+would have caught them applies to the support arm alone, and neither of them entered
+through it; the minimum-retracement gate now applies to **both** arms.
+
+*Nothing required buyers.* NH closed at 22% of its daily range that day and MARICO at 13% —
+near the low, which is the signature of a stock still falling. Meanwhile CEMPRO, 17.1% off
+its swing high, printed a textbook hammer with a lower wick nearly sixteen times its body
+and closed at 74% of its range. The screen ranked all four the same way. It now separates
+them: on the day this landed, the loosened screen went from 78 names to 40, CEMPRO and
+AJANTPHARM survived, NH and MARICO did not.
+
+**All three reversal conditions must hold on the same level.** A low that reached the
+50-day and a close that cleared the 20-day is not a rejection of anything — it is two
+unrelated facts about one bar.
+
+**The reversal bar may be the one before last.** A turn is often confirmed by a quiet inside
+day, and demanding the hammer itself be the final bar throws away the second day of every
+genuine reversal. CEMPRO is the case: its hammer was the 30th, and the 31st closed strong
+without reaching back to the 50-day. Strict takes the last closed bar alone.
+
+**Evidence columns:** `Close Position in Reversal Bar` and `Percent Below Recent Swing
+High`. Distance-to-average and RSI used to sit here; both are already inside the entry
+gate, and neither could separate a name that turned at support from one falling into it.
+
+**Expect a short list.** Most dips do not end on the day you look at them, so PULLBACK is
+now the narrowest of the five setups by some margin. A short list is the gate working.
 
 **Ranked by Score Now.** This is the setup where location scores well and the risk-reward
 veto most often passes, so today's score is genuinely informative here.

@@ -133,7 +133,8 @@ class TestResolveSetupsEdges(unittest.TestCase):
 
 FULL_EVIDENCE = {"pct_from_high": 3.1, "contraction": 0.55, "pos_in_base": 0.82,
                  "vol_mult": 2.4, "pct_above_base": 1.8, "volume_light": False,
-                 "dist_to_ma_pct": 1.4, "rsi": 51.0, "bars_since_cross": 12,
+                 "dist_to_ma_pct": 1.4, "rsi": 51.0, "close_position": 0.74,
+                 "retrace_pct": 17.1, "bars_since_cross": 12,
                  "macd_hist": 0.4, "label": "COILED+LEADER", "mean_fit": 8.0,
                  "count": 2}
 

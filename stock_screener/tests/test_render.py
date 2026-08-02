@@ -13,7 +13,8 @@ def row(sym="TCS", **over):
                       "contraction": 0.55, "pos_in_base": 0.82, "dryup": 0.78,
                       "pct_from_high": 3.1, "rs_1m": 3.2, "rs_3m": 11.5,
                       "full_stack": True, "dist_to_ma_pct": 1.4, "rsi": 51.0,
-                      "retrace_pct": 33.0, "bars_since_cross": 12,
+                      "close_position": 0.74, "retrace_pct": 17.1,
+                      "retrace_of_52w_range_pct": 33.0, "bars_since_cross": 12,
                       "macd_hist": 0.4, "sma200_rising": True,
                       "vol_expansion": 1.2, "count": 2, "label": "COILED+LEADER",
                       "mean_fit": 8.0, "matched": ["COILED", "LEADER"]}}
@@ -183,8 +184,11 @@ class TestEvidenceColumnValues(unittest.TestCase):
         r["evidence"] = dict(r["evidence"], rs_1m=99.0)
         self.assertEqual(self._cells("LEADER", r)[1], "-4.2")
 
-    def test_pullback_shows_distance_to_average_and_a_whole_number_rsi(self):
-        self.assertEqual(self._cells("PULLBACK"), ["1.4%", "51"])
+    def test_pullback_shows_the_reversal_close_and_the_swing_retracement(self):
+        """0.74 renders as a whole-number percentage, the swing retracement to
+        one decimal. Neither is the 52-week range share, which is 33.0 in this
+        fixture and must not appear."""
+        self.assertEqual(self._cells("PULLBACK"), ["74%", "17.1%"])
 
     def test_turn_shows_bars_since_cross_and_a_signed_histogram(self):
         self.assertEqual(self._cells("TURN"), ["12", "+0.40"])
@@ -194,10 +198,11 @@ class TestEvidenceColumnValues(unittest.TestCase):
 
     def test_a_blank_evidence_value_renders_as_a_dash_not_a_crash(self):
         r = row(rs_1m=None)
-        r["evidence"] = dict(r["evidence"], macd_hist=None, rsi=None)
+        r["evidence"] = dict(r["evidence"], macd_hist=None, rsi=None,
+                             close_position=None, retrace_pct=None)
         self.assertEqual(self._cells("LEADER", r)[1], "-")
         self.assertEqual(self._cells("TURN", r)[1], "-")
-        self.assertEqual(self._cells("PULLBACK", r)[1], "-")
+        self.assertEqual(self._cells("PULLBACK", r), ["-", "-"])
 
 
 class TestTableStructure(unittest.TestCase):

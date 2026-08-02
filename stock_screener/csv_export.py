@@ -18,6 +18,7 @@ terminal rendering stay in screener.py; the CSV is an additive output path that
 reuses screener.build_result_row and screener.rank rather than restating either.
 """
 import csv
+import datetime as dt
 import os
 
 import setups
@@ -51,8 +52,14 @@ EVIDENCE = {
                    ("pct_above_base", "pct_above_base")],
     "LEADER":     [("pct_from_high", "pct_from_high"),
                    ("ma_stack_full", "full_stack")],
-    "PULLBACK":   [("dist_to_ma_pct", "dist_to_ma_pct"),
-                   ("rsi", "rsi")],
+    # close_position stays a 0..1 fraction here, like pos_in_base: the terminal
+    # renders it as a percentage, the file keeps the raw number.
+    #
+    # retrace_pct is the percent below a recent SWING HIGH -- the gate's own
+    # number -- not the share of the 52-week range fit_pullback scores. The
+    # evidence dict carries both under separate keys for exactly that reason.
+    "PULLBACK":   [("close_position", "close_position"),
+                   ("retrace_pct", "retrace_pct")],
     "TURN":       [("bars_since_cross", "bars_since_cross"),
                    ("macd_hist", "macd_hist")],
     "CONFLUENCE": [],
@@ -66,6 +73,21 @@ EVIDENCE = {
 SCORE_PLACES = 2
 RS_PLACES = 1
 EVIDENCE_PLACES = 3
+
+# Rows the FILE keeps per setup, ranked. Six setups therefore write at most 120
+# rows for a full scan.
+#
+# It is a SEPARATE limit from --top, not the same one applied twice. --top is
+# terminal readability and clamps at 20 for a different reason: a shortlist a
+# human reads. This is the file's own ceiling, and it exists because the ranking
+# below the twentieth name is not a finding -- a 45-name LEADER table's fortieth
+# row is a name that cleared the gate and nothing more. Keeping it made the file
+# look like a data set when it is a shortlist, and invited exactly the sorting
+# and re-ranking downstream that screener.rank exists to prevent.
+#
+# The rows kept are the TOP of the ranking, so `rank` stays contiguous 1..20 and
+# a reader can still reproduce any terminal table from the file.
+MAX_ROWS_PER_SETUP = 20
 
 DEFAULT_DIR = "scans"
 
@@ -102,6 +124,46 @@ def num(v, places=SCORE_PLACES):
     if v != v:                              # nan: unmeasurable, same as None
         return ""
     return round(v, places)
+
+
+# The two date COLUMNS. `02-Aug-2026`, never `2026-08-02`.
+#
+# Excel parses an ISO date on import, converts it to its internal serial and
+# renders the cell as a bare number: the user opens the file and reads 46236
+# where a date should be. An alphabetic month cannot be mistaken for arithmetic,
+# and it is unambiguous in a way `02-08-2026` is not.
+#
+# The FILENAME deliberately stays ISO -- scans/scan_2026-08-02.csv. That is not
+# an oversight or a missed case: a directory of scans has to list in date order,
+# and `02-Aug-2026` sorts next to `02-Sep-2025`. The split is the point. The two
+# formats serve a spreadsheet cell and a directory listing respectively, and
+# neither format is right for both jobs. See default_path, which is unchanged.
+DATE_FORMAT = "%d-%b-%Y"
+
+
+def date_cell(value):
+    """An ISO date string or date object -> `02-Aug-2026`.
+
+    Anything that is not an ISO date is passed through verbatim rather than
+    dropped: `n/a` is what screener.main stamps when a scan produced no rows at
+    all, and blanking it would turn "we could not tell" into "there was none".
+
+    Mutation note: a `datetime.date` needs no branch of its own, and neither
+    does the empty string. `str(date(2026, 8, 2))` IS "2026-08-02" and
+    `str(datetime(...))` starts with it, so both take the ISO path and land on
+    the same answer; "" fails the parse and falls through to itself. Both
+    special cases were written and both were equivalent mutants -- no test could
+    tell them from their absence -- so they are gone rather than sitting here
+    looking load-bearing. The None guard is NOT equivalent: without it `str(None)`
+    is the text "None", which is exactly the cell num() exists to prevent.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    try:
+        return dt.datetime.strptime(text[:10], "%Y-%m-%d").strftime(DATE_FORMAT)
+    except ValueError:
+        return text
 
 
 def universe_label(path):
@@ -147,9 +209,9 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
     `by_setup` is screener.main's already-ranked {setup: [result rows]} map, in
     FULL -- never sliced to --top. The rank column preserves the terminal's
     ordering because the list is literally the one the terminal ranked, so
-    `rank <= 15` reproduces the on-screen table exactly while the file keeps
-    every match. --top governs terminal readability; it must not decide what a
-    downstream tool is allowed to see.
+    `rank <= 15` reproduces the on-screen table exactly. --top governs terminal
+    readability alone and never reaches this function; the file's own ceiling is
+    MAX_ROWS_PER_SETUP, applied here to the top of each ranking.
 
     `scan_rows` is scan()'s output, used only to answer "what else did this
     symbol match" -- which is asked of the whole scan, not of the chosen subset:
@@ -161,7 +223,8 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
     }
     out = []
     for name in chosen:
-        for rank, r in enumerate(by_setup.get(name) or [], 1):
+        ranked = (by_setup.get(name) or [])[:MAX_ROWS_PER_SETUP]
+        for rank, r in enumerate(ranked, 1):
             pairs = EVIDENCE[name]
             ev = r["evidence"]
             e1_label, e1_value = ((pairs[0][0],
@@ -175,8 +238,10 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
             # to a thinner row rather than losing a finished scan to a KeyError.
             matched = matched_by_symbol.get(r["symbol"], [])
             out.append({
-                "scan_date": scan_date,
-                "last_closed_bar": last_closed_bar,
+                # Formatted here and not by the caller: main() passes the same
+                # ISO scan_date to resolve_path, which must keep it ISO.
+                "scan_date": date_cell(scan_date),
+                "last_closed_bar": date_cell(last_closed_bar),
                 "universe": universe,
                 "mode": mode,
                 "symbol": r["symbol"],

@@ -931,11 +931,13 @@ class TestEvaluateContract(unittest.TestCase):
         tighter_is_higher = {"min_bars", "vol_mult", "rsi_lo", "off_low_pct",
                              "rs_1m_floor", "pos_in_base", "contractions",
                              "thrust_bars", "sma50_rising", "strict_ma_stack",
-                             "swing_margin_atr"}
+                             "swing_margin_atr", "min_retrace_pct",
+                             "close_position"}
         tighter_is_lower = {"atr_pctile", "max_extension_pct", "dryup",
                             "max_from_high_pct", "rsi_hi", "ma_dist_pct",
                             "atr_mult_to_support", "cross_bars",
-                            "atr_pctile_hi", "max_run_pct"}
+                            "atr_pctile_hi", "max_run_pct",
+                            "support_tol_atr", "reversal_bars"}
         seen = set()
         for name, keys in setups.THRESHOLDS.items():
             for key, (lo, st) in keys.items():

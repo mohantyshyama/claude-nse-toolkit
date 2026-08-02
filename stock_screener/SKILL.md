@@ -58,7 +58,7 @@ Five are stages of one bullish life cycle, which is why a name in two is signal:
 | COILED | Volatility contraction inside a base, before the move | Score at Trigger |
 | BREAKOUT | The base breakout on the day it fires | Score Now |
 | LEADER | Established leadership near 52-week highs | Score Now |
-| PULLBACK | Retracement into support inside an uptrend | Score Now |
+| PULLBACK | A retracement into support that has started to turn | Score Now |
 | TURN | Just after a 50/200 golden cross | Score at Trigger |
 | CONFLUENCE | Names matching two or more of the above | Match count |
 
@@ -70,6 +70,13 @@ like any other confluence.
 **BREAKOUT+PULLBACK is impossible** — price cannot be above the prior base high and
 retraced to the 20- or 50-day average at the same time. The engine asserts this; if you
 ever see it reported, it is a predicate bug, not a rare event.
+
+**PULLBACK waits for the turn, not just the dip.** A match is a name at least 3% below a
+recent swing high (5% strict) whose last bar — or the one before it — reached a support
+level, closed back above that same level, and closed in the top half of its own range
+(top 40% strict). A stock still falling into support does not match, however close to its
+20-day it sits. Expect far fewer PULLBACK names than the other setups produce; that is the
+gate working, not a thin tape.
 
 ## Output contract
 
@@ -97,9 +104,14 @@ python3 <skill-dir>/screener.py --setup all --csv log.csv --append   # keep a hi
 
 - **Long format: one row per (symbol, setup).** A stock matching three setups gets three
   rows. Group or filter on the `setup` column; never expect one row per stock.
-- **Every match is written, ignoring `--top`.** `--top` is terminal readability only. The
-  `rank` column preserves the on-screen order, so `rank <= 15` reproduces the table exactly
-  while the file still holds all 210 rows a full scan produces.
+- **The file keeps the top 20 of each setup's ranking**, so a full scan writes at most 120
+  rows. `--top` is a separate limit and governs the terminal alone — it never reaches the
+  file, and raising or lowering it does not change what is written. The `rank` column
+  preserves the on-screen order and stays contiguous `1..20`, so `rank <= 15` reproduces
+  the table exactly.
+- **Dates read `02-Aug-2026`, not `2026-08-02`.** Excel turns an ISO date into its internal
+  serial and shows a bare number. The default *filename* stays ISO
+  (`scans/scan_2026-08-02.csv`) on purpose, so a directory of scans lists chronologically.
 - **`setups_matched` and `match_count` are on every row**, so a COILED row shows the stock
   is also a LEADER without joining the file to itself.
 - **Values are raw numbers** — `6.217`, not `"6.2%"`; `4.106`, not `"4.11x"`; `pos_in_base`
@@ -158,5 +170,6 @@ the key, the FAILED list, or the breadth read.
 | Reporting a BREAKOUT+PULLBACK confluence | Structurally impossible — it is a bug |
 | Padding an empty screen with the "best of a bad lot" | The framework must be able to say "nothing today" |
 | Reading the CSV as one row per stock | It is long format; a three-setup name has three rows |
-| Expecting `--top` to shrink the CSV | It never does — filter on `rank` instead |
+| Expecting `--top` to change the CSV | It governs the terminal only; the file's own cap is 20 per setup |
+| Reading a short PULLBACK list as a data problem | It waits for a reversal at support; most dips do not have one |
 | Appending scans with different `--strict` settings and reading them as one | The `mode` column is there to keep them apart |
