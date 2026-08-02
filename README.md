@@ -17,16 +17,186 @@ in ~22 seconds       real catalysts           13-section report    stops & targe
 
 ## The four skills
 
+Each one narrows what the previous produced. The question you are asking determines which
+you need:
+
+```
+stock_screener  ──►  watchlist_analyser  ──►  stock_analyser  ──►  stock_planner
+
+"what's out          "which of these        "should I buy       "where's my
+ there?"              is best?"               this one?"          stop?"
+
+500 names            8-10 names              1 name              position held
+```
+
 | Skill | Use it when | Produces |
 |---|---|---|
-| **stock_screener** | You want candidates and have no names in mind | Ranked tables for six bullish setups across the Nifty 500 |
-| **watchlist_analyser** | You have 2+ tickers to compare | Comparative table, relative strength vs Nifty 50, "score if the trigger fires" |
-| **stock_analyser** | You have one ticker | Levels, weighted score, entry setups with R:R, position sizing, scenario tree |
-| **stock_planner** | You already hold the stock | Stop and target zones from nine independent methods, clustered by confluence |
+| **stock_screener** | You have no names in mind | Six bullish setups scanned across the Nifty 500 in ~22s, ranked, with CSV export |
+| **watchlist_analyser** | You have 2+ tickers to compare | Comparative table, relative strength vs Nifty 50, "score if the trigger fires", shortlist buckets |
+| **stock_analyser** | You have one ticker | Full 13-section report: levels, weighted score, entry setups with R:R, position sizing, scenario tree, invalidation price |
+| **stock_planner** | You already own it | Stop and target zones from nine independent methods, clustered by how many agree |
 
-They share one scoring engine. `stock_screener` and `watchlist_analyser` both import
+### What each one is for
+
+**`stock_screener`** — the top of the funnel. Scans the Nifty 500 for six named setups
+(COILED, BREAKOUT, LEADER, PULLBACK, TURN, CONFLUENCE), ranks each, and hands you a
+shortlist. Use it when you want candidates rather than an opinion on a name you already
+hold. Exports to CSV for tracking scans over time.
+
+**`watchlist_analyser`** — adjudicates a basket. Adds the two things that only exist across
+a list: relative strength versus the Nifty 50, and a projection of what each score becomes
+*if* its breakout trigger fires. Sorts into BUY / ALERT / LATENT buckets, and flags names
+whose trigger leads somewhere worse than where they already are — the ones that look like
+candidates and are not.
+
+**`stock_analyser`** — the deep workup on a single name. Support and resistance with what
+is actually at each level, the weighted score broken into its six factors, entry setups
+with their risk-reward arithmetic, ATR-normalised position sizing, a scenario tree, and the
+single price that invalidates the thesis.
+
+**`stock_planner`** — for a position you already hold, where the entry question is moot.
+Derives stop and target candidates from nine independent methods (volatility, horizontal
+structure, fibonacci, trendline, high-volume candles, volume nodes, moving averages, pivots,
+measured move) and clusters them into confluence zones, so you can see which levels several
+methods agree on.
+
+### What holds them together
+
+**One scoring engine.** `stock_screener` and `watchlist_analyser` both import
 `stock_analyser/analyze.py` rather than reimplementing it, so **the same stock never carries
 two different scores** — a test asserts equality to nine decimal places.
+
+**The same six factors everywhere:** trend 25% · location 25% · volume 15% · momentum 15% ·
+catalyst 10% · volatility 10%. With one deliberate exception — the screener holds catalyst
+at a neutral 5.0, because a news search across 500 names is not feasible. Closing that gap
+is precisely what `watchlist_analyser` is for.
+
+**The risk-reward veto runs through all four.** Any name whose reward-to-risk falls below
+1.5:1 against a 1.5×ATR stop is capped and demoted, however good its chart. Trend and entry
+price are separate questions, and the whole toolkit is built to keep them separate.
+
+> **A note on test coverage.** Only `stock_screener` has a test suite (914 tests). The other
+> three predate it and have none. That matters most for `analyze.py`: three skills import
+> it, so a regression there would propagate silently with nothing to catch it.
+
+### Which one do I need?
+
+| If you are thinking… | Reach for |
+|---|---|
+| "I have money to deploy and no idea where" | `stock_screener` |
+| "Show me what's breaking out today" | `stock_screener --setup breakout` |
+| "Which stocks are quietly setting up before a move?" | `stock_screener --setup coiled` |
+| "Give me only the highest-conviction names" | `stock_screener --setup confluence --strict` |
+| "I have eight names on a list, which two deserve capital?" | `watchlist_analyser` |
+| "Is my watchlist actually any good, or am I fooling myself?" | `watchlist_analyser` |
+| "Everyone's talking about this stock — is it buyable?" | `stock_analyser` |
+| "What's my downside if I'm wrong here?" | `stock_analyser` |
+| "How many shares can I take at 1% risk?" | `stock_analyser` |
+| "I'm up 12% — do I take it or let it run?" | `stock_planner` |
+| "Where do I move my stop now?" | `stock_planner` |
+
+### Triggering them in Claude Code
+
+They fire on intent — you never need to name the skill:
+
+**stock_screener**
+> *"screen the Nifty 500 for breakouts"* · *"what's coiling right now?"* ·
+> *"find me bullish setups"* · *"scan for stocks near 52-week highs"* ·
+> *"give me watchlist candidates, strict mode"* · *"export the screen to CSV"*
+
+**watchlist_analyser**
+> *"compare TITAN, BEL and CHOLAFIN"* · *"rank my watchlist"* ·
+> *"which of these five should I buy?"* · *"screen these names and drop the weak ones"*
+
+**stock_analyser**
+> *"analyse FEDERALBNK on NSE"* · *"should I go long BAJFINANCE?"* ·
+> *"support and resistance for TITAN"* · *"what are the targets on GAIL?"* ·
+> *"position size for a 1% risk on EICHERMOT"*
+
+**stock_planner**
+> *"I bought GAIL at 181, where's my stop?"* · *"I'm long TITAN from 4700, when do I exit?"* ·
+> *"target and stop for my BAJFINANCE position"*
+
+## A worked run through the funnel
+
+**1. Scan.** No names in mind, so start wide:
+
+```bash
+python3 stock_screener/screener.py --setup all --strict --top 20 --csv
+```
+
+```
+SCAN 02-Aug-2026 (last closed bar 31-Jul-2026) · universe nifty500 (500) · strict
+scored 500 · FAILED 0 · below turnover floor 0
+matches  COILED 0 · BREAKOUT 4 · LEADER 27 · PULLBACK 7 · TURN 20 · CONFLUENCE 5
+```
+
+Five names match two or more setups. The top row matches three — but read the risk-reward
+column before getting excited:
+
+| Symbol | Setups | Score | R:R | Action |
+|---|---|---|---|---|
+| GAIL | BREAKOUT+LEADER+TURN | 6.12 | **0.35:1** | ALERT |
+| BAJFINANCE | BREAKOUT+TURN | 7.80 | 2.46:1 | BUY NOW |
+
+**GAIL matches the most setups and is still not buyable.** Resistance sits three times
+closer than the stop. It is an alert at its trigger price, not a position. This is the
+distinction the whole toolkit exists to enforce.
+
+**2. Adjudicate.** Take the shortlist into `watchlist_analyser`, which sets real catalysts
+per name — the 10% of the score the screener could not evaluate:
+
+```bash
+python3 watchlist_analyser/watchlist.py "FEDERALBNK,BAJFINANCE,BAJAJ-AUTO,TITAN,GAIL"
+```
+
+It prints a NEWS SCAN LIST — the names worth searching. Re-run once with what you find:
+
+```bash
+python3 watchlist_analyser/watchlist.py "FEDERALBNK,BAJFINANCE,TITAN" \
+    --catalyst FEDERALBNK=8,BAJFINANCE=7,TITAN=5 --detail
+```
+
+**3. Work up the survivor.**
+
+```bash
+python3 stock_analyser/analyze.py FEDERALBNK --catalyst 8
+```
+
+Full report: the verdict first, then levels with what is actually at each one, the six
+score components, entry setups with their R:R arithmetic, share counts at 1% account risk,
+a scenario tree, and the single price that breaks the thesis.
+
+**4. Manage it.** Once you are in:
+
+```bash
+python3 stock_analyser/levels.py FEDERALBNK --entry 358.85
+```
+
+Nine methods, clustered. Rank the zones by how many methods agree, then filter by distance —
+a six-method cluster 0.3×ATR away is not a stop, it is where price already is.
+
+## Design principles
+
+Four ideas recur across all the skills, and they are the reason the output looks the way it
+does.
+
+**The verdict comes first.** Every report leads with its conclusion — INITIATE / HALF SIZE /
+WATCHLIST / STAND ASIDE — rather than making you hunt for it beneath the analysis. If bias
+and action diverge ("bullish, but no long here"), that is stated explicitly along with the
+arithmetic that forces it.
+
+**A weak case still produces a call.** The framework must be able to say STAND ASIDE and
+give the levels that would change its mind. "It depends" and "consult an adviser" are the
+one output it cannot produce — a screener that never says no is not a screener.
+
+**An empty result is a finding.** When nothing matches, the output says so plainly and names
+the condition that rejected the field. Nothing is ever padded to fill a list.
+
+**Numbers must be interrogable.** Every score is broken into its components, every level says
+what is at it (swing low, volume node, moving average, fibonacci, pivot), and every column
+carries its unit. A level with only one thing at it is weak, and the report says so rather
+than leaving you to work it out.
 
 ## Quick start
 
