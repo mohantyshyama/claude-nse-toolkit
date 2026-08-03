@@ -28,6 +28,44 @@ and a test asserts this across the live universe.
 
 ---
 
+## The timeframe the setups are asked on
+
+Every number in this document is a **bar count**, and `--timeframe` decides what a bar is.
+The default is `daily`: 2 years of daily bars. `--timeframe weekly` reads 10 years of
+weekly bars instead.
+
+**A weekly setup is a different horizon, not a smoothed daily one.** Nothing here is
+averaged, filtered or confirmed by moving to weekly. The same five predicates are asked of
+a chart whose every bar is a week, which is a different question about a different span of
+market history. A weekly LEADER is not a daily LEADER that survived a filter, and the two
+scans usually return different names rather than one being a subset of the other.
+
+So "the 200-day average" below means *the 200-period average of the primary series* — about
+four years on weekly. "126 sessions" means 126 bars, about two and a half years of weeks.
+"The last 5 swing highs" means five weekly swings. Read every window in this document that
+way, and the thresholds themselves are unchanged: 3% below a swing high is 3% either way,
+but on weekly it is 3% below a *weekly* swing high, which is a larger and slower structure.
+
+Two consequences worth stating outright:
+
+- **Momentum on weekly is weekly-only.** A daily scan blends the daily RSI and MACD with
+  the weekly ones confirming them. Weekly has nothing above it, so those confirmation terms
+  are absent — not filled in by reusing the weekly series in both slots, which would count
+  one reading as two agreeing timeframes. Weekly momentum therefore spans 2.5–7.5 rather
+  than 0–10 and pulls the weighted total toward neutral. Half the evidence is genuinely
+  missing, and pretending otherwise would be the error.
+- **Weekly is not uniformly stricter.** Measured on the live Nifty 500 on 2026-08-03,
+  loosened, daily → weekly: COILED 8→7, BREAKOUT 13→3, LEADER 30→19, PULLBACK 17→**20**,
+  TURN 23→5, CONFLUENCE 18→1. What collapses is everything gated on a recent dated *event*
+  — a breakout bar, a fresh 50/200 cross — because the same calendar window holds a fifth
+  as many bars. PULLBACK goes the other way; see its section below.
+
+Ten years of weekly bars and not five, because five gives only 262 bars: a 200-period
+average would consume 199 of them and leave 63 usable, fewer than the 90-bar thrust window.
+Ten gives 523 and 324 usable — the same working depth the daily path has.
+
+---
+
 ## Volume confirmation, and why each setup asks a different question
 
 Every setup carries a volume test, and they are deliberately **not the same test wearing
@@ -413,6 +451,17 @@ half of a wide range, a level reclaimed after being probed — those are a selle
 and a buyer showing up, on the same bar, at the level that matters. Without one, the two
 facts the old version relied on (near an average, momentum cooled) are equally true of a
 stock on its way down through both.
+
+**On weekly, PULLBACK is the setup that gets *easier*, not harder.** The obvious
+expectation is that a weekly reversal bar — a whole week closing in the top half of its
+range at support — must be far rarer than a daily one, so weekly PULLBACK should be nearly
+empty. It is not: on the live Nifty 500 on 2026-08-03, PULLBACK matched 17 names daily and
+20 weekly, the only setup of the six to rise. A week closing in the upper half of its own
+range is no less common than a day doing so, and weekly swings clear the 3% retracement
+gate more readily than daily ones. What a weekly PULLBACK *does* mean is a slower and
+larger structure: the retracement is measured against weekly swing highs and the support
+is a multi-year average, so each match is a bigger statement than its daily namesake, even
+though there are more of them.
 
 **The condition that defines this setup — and that is deliberately not loosened — is that
 the 200-day average must be rising.** That single test is what separates "a pullback in an

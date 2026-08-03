@@ -38,6 +38,9 @@ is fine for a live quote cross-check.
    same to compute (one scoring pass feeds every predicate), so selecting several is free.
    If the user already named a setup, skip the question.
 2. `python3 <skill-dir>/screener.py --setup <names> --top 15` — one call, ~23s for 500 names.
+   Add `--timeframe weekly` when the user is asking about a longer horizon rather than
+   this week's entries; it is a different question, not a smoothed version of the daily
+   answer — see Timeframes below.
    Add `--csv` when the user wants the matches in a file — to sort in a spreadsheet, to
    diff against yesterday's scan, or to keep a record. It costs nothing extra: the scan
    already ran. Add `--csv-per-setup` alongside it when they want each setup in its own
@@ -96,9 +99,73 @@ level, closed back above that same level, and closed in the top half of its own 
 20-day it sits. Expect far fewer PULLBACK names than the other setups produce; that is the
 gate working, not a thin tape.
 
+## Timeframes — `--timeframe daily|weekly`
+
+```bash
+python3 <skill-dir>/screener.py --setup all                      # daily (default)
+python3 <skill-dir>/screener.py --setup all --timeframe weekly   # weekly bars
+```
+
+**A weekly setup is a different horizon, not a smoothed daily one.** This is the single
+thing to get right about the flag. It does not average the daily chart, it does not filter
+noise out of a daily signal, and a weekly COILED is not "a daily COILED, confirmed". It is
+the same five predicates asked of a chart whose every bar is a week, which is a different
+question about a different span of market history — and the answer is frequently a
+different set of names, not a subset.
+
+What changes:
+
+- **The bars.** Daily reads 2 years of daily bars; weekly reads **10 years** of weekly
+  bars. Ten and not five because five years of weekly data is only 262 bars: a 200-period
+  average would consume 199 of them and leave 63 usable, less than the 90-bar thrust
+  window. Ten years gives 523 bars and 324 usable, the same working depth the daily path
+  has.
+- **Periods stay bar counts.** 20/50/100/200 are periods on whatever the primary timeframe
+  is, so on weekly the **200-period average is roughly four years** and the 50-period one
+  about a year. That is the intended meaning. The 50-bar up/down volume ratio becomes a
+  year of weeks, the 126-bar ATR percentile about two and a half years, and the 250-bar
+  52-period range about five years.
+- **Momentum is weekly-only.** A daily scan blends daily and weekly RSI and MACD, the
+  weekly reading confirming the daily one. Weekly has nothing above it, so the
+  confirmation terms are simply absent — they are *not* filled in by passing the weekly
+  series twice, which would count one reading as two agreeing timeframes. The honest
+  consequence is that weekly momentum has a narrower range (2.5–7.5 rather than 0–10) and
+  therefore pulls the weighted total toward neutral. Half the evidence is genuinely
+  missing.
+- **Relative strength is measured in weeks.** The two RS columns are 21 and 63 *primary
+  bars* against the Nifty 50 over the same window. On a weekly scan that is 21 and 63
+  weeks, and the benchmark is fetched on weekly bars so both sides of the subtraction
+  agree. The column headers still read "1-month" and "3-month"; the scan header's
+  `weekly bars` is what tells the reader otherwise, and it is worth restating in the
+  write-up.
+- **Match counts move a lot, and not in one direction.** Measured on the live Nifty 500 on
+  2026-08-03, loosened: COILED 8→7, BREAKOUT 13→3, LEADER 30→19, TURN 23→5, CONFLUENCE
+  18→1 — but PULLBACK went 17→**20**. The intuition that a weekly reversal bar is a rarer
+  event than a daily one is wrong: a week closing in the top half of its own range is no
+  less common than a day doing so, and weekly swings clear the 3% retracement gate more
+  easily, so PULLBACK is if anything *easier* on weekly. What genuinely collapses is
+  anything needing a recent, dated event — a breakout bar, a fresh 50/200 cross — because
+  the same calendar window holds a fifth as many bars. CONFLUENCE collapses hardest, since
+  it needs two of those to land on the same name in the same week.
+- **A newly listed name has no weekly history.** The engine needs 60 primary bars, which is
+  60 weeks. 21 of the 500 failed the weekly scan for that reason and none failed the daily
+  one. They appear in the FAILED list, as they should.
+
+Everything else — the thrust detection, the consolidation anchor, the fractals, the
+rejection zones, the volume profile, the 52-period range, and the risk-reward gate with its
+1.5×ATR stop — reads the primary series already, so it follows the timeframe without
+changing meaning. The rejection-funnel text still says "sessions" where it means bars; on a
+weekly scan read those as weeks.
+
+The timeframe is recorded in three places so a weekly scan and a daily scan can never be
+read as one: the scan header's first line, the `timeframe` field of `--json`, and the
+`bar_timeframe_daily_or_weekly` column on every CSV row.
+
 ## Output contract
 
-1. **Scan header** — date, universe, counts, FAILED list, per-setup match counts.
+1. **Scan header** — date, universe, timeframe, counts, FAILED list, per-setup match
+   counts. The first line names the bars (`· daily bars` / `· weekly bars`); carry that
+   into the write-up, because every number below it is measured in them.
 2. **One table per chosen setup**, ranked. Full-word column headers, always including
    `Sector`, `Score Now (catalyst-neutral)`, `Up/Down Volume Ratio`, `Volume Signal` and
    `Accumulation Trend`. Include `showing top N of M` whenever the list was truncated.
@@ -174,7 +241,7 @@ file is read cold.
   one table. `--json` and `--csv` are independent and may be used together; the "wrote N
   rows" notice goes to stderr so JSON on stdout stays parseable.
 
-### The 31 columns, in order
+### The 32 columns, in order
 
 | # | Column | What it holds |
 |---|---|---|
@@ -182,33 +249,34 @@ file is read cold.
 | 2 | `last_closed_bar_date` | The last completed session the scan read |
 | 3 | `universe_name` | `nifty500` — the universe, not the file it came from |
 | 4 | `threshold_mode` | `strict` or `loosened` |
-| 5 | `symbol` | NSE ticker |
-| 6 | `sector` | NSE sector |
-| 7 | `setup_name` | `COILED`, `BREAKOUT`, `LEADER`, `PULLBACK`, `TURN`, `CONFLUENCE` |
-| 8 | `rank_within_setup` | 1..20, this setup's own ranking |
-| 9 | `setup_fit_score_0_to_10` | How well the name fits *this* setup |
-| 10 | `score_now_catalyst_neutral_0_to_10` | Weighted 6-factor total, catalyst held at 5.0 |
-| 11 | `score_if_trigger_fires_0_to_10` | The same total projected at the breakout trigger |
-| 12 | `risk_reward_ratio_vs_1p5_atr_stop` | Reward ÷ risk, risk measured to the 1.5×ATR stop |
-| 13 | `risk_reward_veto_applied` | `1` when R:R fell under 1.5 and the name was demoted |
-| 14 | `action_bucket` | `BUY NOW` / `BUY HALF` / `ALERT` / `WATCH` |
-| 15 | `last_price` | Close of the last completed session |
-| 16 | `trigger_price_that_repairs_setup` | The breakout level the projection assumes |
-| 17 | `stop_price_1p5_atr_below_last` | `last_price − 1.5 × daily ATR` |
-| 18 | `relative_strength_1month_vs_nifty50_pct_points` | 1-month return minus Nifty 50's, in points of percent |
-| 19 | `relative_strength_3month_vs_nifty50_pct_points` | The same over 3 months |
-| 20 | `up_down_volume_ratio_50d` | Up-close volume ÷ down-close volume, 50 sessions |
-| 21 | `close_weighted_volume_ratio_50d` | The same 50 sessions, each bar weighted by where it closed in its own range |
-| 22 | `up_down_volume_ratio_20d` | The plain ratio over the last 20 sessions |
-| 23 | `volume_signal_reading` | `accumulation` / `distribution-into-strength` / `supported` / `distribution` / `unknown` |
-| 24 | `accumulation_trend_reading` | `strengthening` / `steady` / `flattening` / `fading` / `reversed` / `unknown` |
-| 25 | `all_setups_matched` | Pipe-delimited, life-cycle ordered, on every row |
-| 26 | `setups_matched_count` | How many, CONFLUENCE excluded |
-| 27 | `evidence_1_metric_name` | The setup-specific metric, e.g. `contraction` |
-| 28 | `evidence_1_metric_value` | Its raw number |
-| 29 | `evidence_2_metric_name` | The second setup-specific metric |
-| 30 | `evidence_2_metric_value` | Its raw number |
-| 31 | `warning_flags` | Pipe-delimited caveats; `volume_light` today |
+| 5 | `bar_timeframe_daily_or_weekly` | `daily` or `weekly` — the bars every number in the row was measured in |
+| 6 | `symbol` | NSE ticker |
+| 7 | `sector` | NSE sector |
+| 8 | `setup_name` | `COILED`, `BREAKOUT`, `LEADER`, `PULLBACK`, `TURN`, `CONFLUENCE` |
+| 9 | `rank_within_setup` | 1..20, this setup's own ranking |
+| 10 | `setup_fit_score_0_to_10` | How well the name fits *this* setup |
+| 11 | `score_now_catalyst_neutral_0_to_10` | Weighted 6-factor total, catalyst held at 5.0 |
+| 12 | `score_if_trigger_fires_0_to_10` | The same total projected at the breakout trigger |
+| 13 | `risk_reward_ratio_vs_1p5_atr_stop` | Reward ÷ risk, risk measured to the 1.5×ATR stop |
+| 14 | `risk_reward_veto_applied` | `1` when R:R fell under 1.5 and the name was demoted |
+| 15 | `action_bucket` | `BUY NOW` / `BUY HALF` / `ALERT` / `WATCH` |
+| 16 | `last_price` | Close of the last completed session |
+| 17 | `trigger_price_that_repairs_setup` | The breakout level the projection assumes |
+| 18 | `stop_price_1p5_atr_below_last` | `last_price − 1.5 × daily ATR` |
+| 19 | `relative_strength_1month_vs_nifty50_pct_points` | 1-month return minus Nifty 50's, in points of percent |
+| 20 | `relative_strength_3month_vs_nifty50_pct_points` | The same over 3 months |
+| 21 | `up_down_volume_ratio_50d` | Up-close volume ÷ down-close volume, 50 sessions |
+| 22 | `close_weighted_volume_ratio_50d` | The same 50 sessions, each bar weighted by where it closed in its own range |
+| 23 | `up_down_volume_ratio_20d` | The plain ratio over the last 20 sessions |
+| 24 | `volume_signal_reading` | `accumulation` / `distribution-into-strength` / `supported` / `distribution` / `unknown` |
+| 25 | `accumulation_trend_reading` | `strengthening` / `steady` / `flattening` / `fading` / `reversed` / `unknown` |
+| 26 | `all_setups_matched` | Pipe-delimited, life-cycle ordered, on every row |
+| 27 | `setups_matched_count` | How many, CONFLUENCE excluded |
+| 28 | `evidence_1_metric_name` | The setup-specific metric, e.g. `contraction` |
+| 29 | `evidence_1_metric_value` | Its raw number |
+| 30 | `evidence_2_metric_name` | The second setup-specific metric |
+| 31 | `evidence_2_metric_value` | Its raw number |
+| 32 | `warning_flags` | Pipe-delimited caveats; `volume_light` today |
 
 `up_down_volume_ratio_50d` is on every row including CONFLUENCE — a per-symbol metric like
 the relative-strength pair, not an evidence slot, so it sits with them rather than in the
@@ -228,8 +296,12 @@ Either label reads `unknown` when there was too little volume history to classif
 a stated finding, and written out as that word rather than left blank. The numbers are kept
 alongside the labels so the file carries the inputs, not only the verdict.
 
-`threshold_mode` records `strict` or `loosened`, so two files from different threshold
-settings can never be silently concatenated as one scan.
+`threshold_mode` records `strict` or `loosened`, and `bar_timeframe_daily_or_weekly`
+records which bars produced the row, so two files from different threshold settings — or
+from different timeframes — can never be silently concatenated as one scan. The timeframe
+column matters more than the mode one: a loosened and a strict scan measure the same thing
+at two sensitivities, while a daily and a weekly scan measure two different horizons, and
+every score, period and evidence number in the row changes meaning with it.
 
 ### `--csv-per-setup`
 
@@ -398,6 +470,10 @@ the key, the FAILED list, or the breadth read.
 | Passing `--csv` and `--csv-dir` together | Usage error — one names a file, the other a directory; `--csv-dir` alone is sufficient |
 | Passing `--append` with `--csv-dir` | Usage error — the folder is new and empty every run, so there is nothing to append to |
 | Reading `--csv-dir` folders as chronologically sorted | The folder name is `dd-mm-yy` by request; only the `--csv` filename is ISO |
+| Describing a weekly scan as a smoothed or confirmed daily one | It is a different horizon; a weekly 200-period average is ~4 years |
+| Comparing a weekly Setup Fit or Score Now against a daily one | Different bars, different periods, and weekly momentum has a narrower range |
+| Reading weekly RS as 1-month and 3-month | They are 21 and 63 *weeks* on a weekly scan; the header says which bars ran |
+| Concatenating a daily and a weekly CSV without filtering | `bar_timeframe_daily_or_weekly` exists precisely so this is visible |
 | Reading a short PULLBACK list as a data problem | It waits for a reversal at support; most dips do not have one |
 | Appending scans with different `--strict` settings and reading them as one | The `threshold_mode` column is there to keep them apart |
 | Reporting a sub-1.0 `Up/Down Volume Ratio` without comment | The price chart and the volume disagree, and only the reader can weigh that |
