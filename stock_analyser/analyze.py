@@ -314,6 +314,32 @@ def score_volume(v_last, av20, av50, thrusts, rows):
 
 
 def score_momentum(rsi_d, rsi_w, hist_d, hist_w):
+    """Momentum from the PRIMARY series plus a higher-timeframe confirmation.
+
+    The first and third arguments read the timeframe being traded; the second
+    and fourth are the slower series confirming it. Every arm is independently
+    guarded on None, which is what makes the function degrade correctly when
+    there is no higher timeframe at all.
+
+    HOW IT DEGRADES, and why it is this way. A weekly scan (compute
+    timeframe="weekly") has no series above it, so it calls this as
+    ``score_momentum(rsi_weekly, None, hist_weekly, None)``: the weekly reading
+    drives the primary arms -- the constructive 50-65 band, the extended check,
+    the oversold check and the MACD sign -- and the two confirmation arms simply
+    do not fire.
+
+    Passing the weekly series in BOTH slots was considered and rejected. It
+    would count one RSI and one histogram twice, turning a single reading into
+    what looks like two timeframes agreeing, and it would inflate a weekly
+    MACD-positive name by 2.5 points where a daily one earns 1.0 for the same
+    fact. Double-counting a reading is not the same measurement as confirming
+    it.
+
+    The honest consequence is a narrower range on weekly: 2.5..7.5 rather than
+    0..10, because half the evidence is absent. That is correct -- one
+    timeframe carries less information than two -- and it is why weekly
+    momentum pulls the weighted total toward neutral rather than away from it.
+    """
     pts = 5.0
     if rsi_d is not None:
         if 50 <= rsi_d <= 65:
@@ -373,20 +399,93 @@ def band(total, rr):
 
 # ----------------------------------------------------------------------- main
 
-def compute(sym, catalyst=5.0, render=False, as_json=False):
+# The bars each timeframe is measured in: (primary request, higher-timeframe
+# request or None). The PRIMARY series is what every period, window and lookback
+# below is counted in -- the 20/50/100/200 averages, the 250-bar 52-period
+# range, the 90-bar thrust window, the fractals, the volume profile and the R:R
+# gate all read `d`, so they follow the timeframe without any of them knowing it
+# changed. The higher timeframe is used for one thing only: confirming momentum.
+#
+# WHY WEEKLY FETCHES 10y AND NOT 5y. Measured against the live API on
+# 2026-08-01, RELIANCE: 5y/1wk returns 262 bars and 10y/1wk returns 523. A
+# 200-period average consumes the first 199, so a 5y weekly primary would leave
+# 63 usable bars -- less than the 90-bar thrust window and barely a quarter of
+# the 250-bar range -- and most of the structure below would be computed on a
+# stub or not at all. 10y leaves 324, which is the same working depth 2y/1d
+# gives the daily path (500 bars, 301 usable).
+#
+# PERIODS ARE BAR COUNTS, NOT CALENDAR SPANS. A 200-period average on weekly
+# bars is roughly four years, and that is the intended meaning: the weekly scan
+# is a different HORIZON, not a smoothed version of the daily one.
+#
+# `label` is the word the too-little-history error uses. It is data rather than
+# the interval string because "only 50 1d bars" is not the sentence the daily
+# path has always printed, and that message is part of the behaviour being held
+# fixed.
+TIMEFRAMES = {
+    "daily":  {"primary": ("2y", "1d"),   "higher": ("5y", "1wk"),
+               "label": "daily"},
+    "weekly": {"primary": ("10y", "1wk"), "higher": None,
+               "label": "weekly"},
+}
+
+
+def compute(sym, catalyst=5.0, render=False, as_json=False, timeframe="daily"):
     """Every number for one symbol. THE single scoring implementation.
 
     watchlist_analyser imports this rather than reimplementing the factors --
     two copies of the scoring would drift apart and the comparative table
     would stop agreeing with the single-name report.
+
+    `timeframe` selects the bars everything is measured in, and defaults to
+    exactly the behaviour this function has always had. stock_analyser and
+    watchlist_analyser never pass it, so their results are unchanged to the bit
+    -- tests/test_analyze_daily_regression.py in stock_screener pins the
+    complete returned dict for ten names and fails on any difference in it.
+
+      daily  (default) -- 2y of 1d bars, with 5y of 1wk bars confirming momentum
+      weekly           -- 10y of 1wk bars, and NO higher timeframe
+
+    THE SHAPE OF THE RESULT DOES NOT CHANGE, and one thing about it needs
+    stating plainly. The `rsi`, `macd` and `atr` blocks have slots named
+    "daily" and "weekly". Those names describe the DAILY case, where the
+    primary series is daily and the higher one is weekly. On a weekly run the
+    "daily" slot carries the PRIMARY (weekly) series and the "weekly" slot is
+    None, because there is no series above weekly to confirm it. The slots were
+    not renamed because renaming them would change the daily result for two
+    skills that have no tests; the compromise is recorded here and in SKILL.md
+    rather than left to be discovered.
+
+    `render=True` is refused on any timeframe with no higher series: the report
+    prints "RSI daily .. weekly .." and "MACD daily hist .. weekly hist ..",
+    and formatting None through those would raise a TypeError mid-report. A
+    weekly consumer wants the dict, and stock_screener takes it.
     """
     sym = sym.upper().replace(".NS", "")
 
-    d, meta = fetch(sym, "2y", "1d")
-    w, _ = fetch(sym, "5y", "1wk")
+    tf = TIMEFRAMES.get(timeframe)
+    if tf is None:
+        raise SystemExit(f"ERROR: unknown timeframe {timeframe!r} for {sym} - "
+                         f"use {' or '.join(sorted(TIMEFRAMES))}.")
+    if render and tf["higher"] is None:
+        raise SystemExit(f"ERROR: the {timeframe} timeframe has no higher "
+                         f"series, and the printed report has a line for one. "
+                         f"Call compute(render=False) and read the dict.")
+    interval_label = tf["label"]
+
+    d, meta = fetch(sym, *tf["primary"])
+    # [] rather than a branch further down: rsi(), atr() and macd() all return
+    # None for a series this short, so every weekly-slot value and the two
+    # higher-timeframe momentum arms switch themselves off. That is the whole
+    # of "weekly has no higher timeframe" -- no parallel code path to keep in
+    # step with the daily one, and nothing that could pass the primary series
+    # in twice by accident.
+    w = []
+    if tf["higher"] is not None:
+        w, _ = fetch(sym, *tf["higher"])
     if len(d) < 60:
-        raise SystemExit(f"ERROR: only {len(d)} daily bars for {sym} - "
-                         f"too little history for this framework.")
+        raise SystemExit(f"ERROR: only {len(d)} {interval_label} bars for "
+                         f"{sym} - too little history for this framework.")
 
     dc = [r["c"] for r in d]
     wc = [r["c"] for r in w]
