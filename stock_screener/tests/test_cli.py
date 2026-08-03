@@ -179,9 +179,11 @@ class _MainStub:
                       screener.W.score_at_trigger)
         stub = self
 
-        def fake_scan(pairs, strict=False, min_turnover=3.0, workers=16):
+        def fake_scan(pairs, strict=False, min_turnover=3.0, workers=16,
+                      timeframe="daily"):
             stub.scan_kwargs = {"pairs": pairs, "strict": strict,
-                                "min_turnover": min_turnover, "workers": workers}
+                                "min_turnover": min_turnover,
+                                "workers": workers, "timeframe": timeframe}
             return stub.rows, stub.failed
 
         def fake_universe(path=None, sectors=None):

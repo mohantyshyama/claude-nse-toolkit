@@ -484,8 +484,8 @@ class TestCoiledBreakoutIsALegitimateConfluence(unittest.TestCase):
         """Drive screener.scan over one seeded symbol, engine stubbed out."""
         import screener
         saved = (A.compute, screener.index_returns)
-        A.compute = lambda sym, catalyst=5.0: dict(o, symbol=sym)
-        screener.index_returns = lambda: {"1m": 2.0, "3m": 5.0}
+        A.compute = lambda sym, catalyst=5.0, timeframe="daily": dict(o, symbol=sym)
+        screener.index_returns = lambda *a, **k: {"1m": 2.0, "3m": 5.0}
         try:
             return screener.scan([(symbol, sector)], workers=1)
         finally:
@@ -592,8 +592,8 @@ class TestBreakoutPullbackIsStillImpossible(unittest.TestCase):
         self.forced(BREAKOUT=self.ALWAYS, PULLBACK=self.ALWAYS)
         saved = (A.compute, screener.index_returns)
         o = rig.scored()
-        A.compute = lambda sym, catalyst=5.0: dict(o, symbol=sym)
-        screener.index_returns = lambda: {"1m": 2.0, "3m": 5.0}
+        A.compute = lambda sym, catalyst=5.0, timeframe="daily": dict(o, symbol=sym)
+        screener.index_returns = lambda *a, **k: {"1m": 2.0, "3m": 5.0}
         try:
             rows, failed = screener.scan([("LYNX", "S")], workers=1)
         finally:

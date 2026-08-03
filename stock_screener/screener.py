@@ -17,11 +17,27 @@ SCAN_CATALYST = 5.0     # a WebSearch per name is impossible across 500; every
                         # score in this skill is therefore catalyst-neutral.
 
 
-def index_returns():
+def index_returns(timeframe="daily"):
     """Nifty 50 baseline for relative strength. Degrades to None on failure --
-    a missing benchmark blanks the RS columns; it must not kill the scan."""
+    a missing benchmark blanks the RS columns; it must not kill the scan.
+
+    Fetched on the SAME bars the scan is running, and this is not cosmetic.
+    Relative strength is `o["returns"][k] - idx[k]`, and o["returns"] is 21 and
+    63 PRIMARY bars. Left on daily bars while the scan ran weekly, the
+    subtraction would take a 21-WEEK stock return away from a 21-DAY index
+    return and publish the difference as relative strength -- a five-month move
+    scored against a one-month benchmark, in every row of every table.
+
+    The "1m"/"3m" keys keep their names on weekly. They are the dict's wiring,
+    shared with analyze.compute()'s own returns block; on a weekly scan the two
+    windows are 21 and 63 weeks and the scan header says so.
+    """
+    # Resolved OUTSIDE the try: an unknown timeframe is a caller error and must
+    # raise, not be swallowed by the network-failure handler and reported as a
+    # missing benchmark.
+    rng, interval = setups.primary_request(timeframe)
     try:
-        rows, _ = A.fetch(NIFTY, "2y", "1d", suffix="")
+        rows, _ = A.fetch(NIFTY, rng, interval, suffix="")
         closes = [r["c"] for r in rows]
         return {"1m": A.pct_return(closes, 21), "3m": A.pct_return(closes, 63)}
     except BaseException as e:                    # noqa: BLE001 - report, don't abort
@@ -30,19 +46,25 @@ def index_returns():
         return {"1m": None, "3m": None}
 
 
-def scan(pairs, strict=False, min_turnover=3.0, workers=16):
+def scan(pairs, strict=False, min_turnover=3.0, workers=16,
+         timeframe="daily"):
     """Score every symbol and evaluate all six setups against the results.
 
     Each worker catches BaseException: analyze.fetch() raises SystemExit on an
     unresolvable ticker, which `except Exception` does NOT catch, and one dead
     symbol would otherwise abort a 500-name scan.
+
+    `timeframe` reaches all THREE places a scan derives numbers from bars --
+    the benchmark, the score, and the setup context -- and they must agree. A
+    weekly score evaluated against a daily context is not a weekly scan and not
+    a daily one; it is two horizons averaged with no label saying so.
     """
-    idx = index_returns()
+    idx = index_returns(timeframe)
 
     def run(pair):
         sym, sector = pair
         try:
-            o = A.compute(sym, catalyst=SCAN_CATALYST)
+            o = A.compute(sym, catalyst=SCAN_CATALYST, timeframe=timeframe)
             rs = {k: (o["returns"][k] - idx[k])
                   if o["returns"].get(k) is not None and idx.get(k) is not None
                   else None
@@ -52,7 +74,8 @@ def scan(pairs, strict=False, min_turnover=3.0, workers=16):
             # race on. It rides inside the existing scoring pass.
             diag = {}
             matched = setups.evaluate(o, rs, strict=strict,
-                                      min_turnover=min_turnover, diag=diag)
+                                      min_turnover=min_turnover, diag=diag,
+                                      timeframe=timeframe)
             # evaluate() returns None for an illiquid name and {} for a liquid
             # one that matched nothing. Record which happened, then normalise to
             # a dict so no downstream `name in row["matched"]` sees a None.
@@ -313,10 +336,19 @@ def render_key(setup):
 
 
 def render_header(scan_date, closed_bar, universe_name, n_universe, strict,
-                  n_scored, failed, n_illiquid, counts):
+                  n_scored, failed, n_illiquid, counts, timeframe="daily"):
+    """The first line states everything that decides what the rows below mean.
+
+    The timeframe belongs there beside the mode for the same reason the mode is
+    there: a weekly COILED table and a daily COILED table are answers to
+    different questions, and a reader scrolling past the header has no other
+    way to tell which one they are looking at. `weekly bars`, not `weekly` --
+    the periods below are bar counts on that interval, so a weekly 200-period
+    average is about four years and not a smoothed 200 days.
+    """
     mode = "strict" if strict else "loosened"
     lines = [f"SCAN {scan_date} (last closed bar {closed_bar}) · universe "
-             f"{universe_name} ({n_universe}) · {mode}"]
+             f"{universe_name} ({n_universe}) · {mode} · {timeframe} bars"]
     names = ", ".join(s for s, _ in failed[:6]) + ("..." if len(failed) > 6 else "")
     lines.append(f"scored {n_scored} · FAILED {len(failed)}"
                  + (f" ({names})" if failed else "")
@@ -461,6 +493,13 @@ def parse_args(argv):
                    help="comma list; case-insensitive substring match")
     p.add_argument("--top", type=int, default=DEFAULT_TOP)
     p.add_argument("--strict", action="store_true")
+    # choices=, so a typo is a usage error before ~23 seconds of network work
+    # rather than a KeyError inside a worker that lands the symbol in FAILED.
+    p.add_argument("--timeframe", default="daily", choices=("daily", "weekly"),
+                   help="bars every period is counted in: daily (default, 2y "
+                        "of daily bars) or weekly (10y of weekly bars). Weekly "
+                        "is a different horizon, not a smoothed daily -- a "
+                        "200-period average becomes about four years")
     p.add_argument("--min-turnover", type=float, default=3.0,
                    dest="min_turnover", help="rupees crore, median over 50 days")
     p.add_argument("--workers", type=int, default=16)
@@ -556,7 +595,7 @@ def main(argv=None):
                           sectors=a.sector.split(",") if a.sector else None)
 
     rows, failed = scan(pairs, strict=a.strict, min_turnover=a.min_turnover,
-                        workers=a.workers)
+                        workers=a.workers, timeframe=a.timeframe)
 
     by_setup, counts = {}, {}
     for name in ALL_SETUPS:
@@ -590,7 +629,8 @@ def main(argv=None):
         csv_rows = csv_export.build_rows(rows, by_setup, chosen, scan_date,
                                          closed,
                                          csv_export.universe_label(a.universe),
-                                         csv_export.mode_label(a.strict))
+                                         csv_export.mode_label(a.strict),
+                                         a.timeframe)
         written = csv_export.write_csv(path, csv_rows, append=a.append)
         # stderr, so --json --csv together still emits parseable JSON on stdout.
         print("wrote %d rows to %s" % (written, path), file=sys.stderr)
@@ -608,7 +648,11 @@ def main(argv=None):
             "scan": {"date": scan_date, "last_closed_bar": closed,
                      "universe": os.path.basename(a.universe),
                      "universe_size": len(pairs), "scored": len(rows),
-                     "strict": a.strict, "top": top, "counts": counts},
+                     # Beside "strict" for the reason the header carries it:
+                     # --json is a file too, and two scans of the same universe
+                     # on two timeframes are otherwise indistinguishable.
+                     "strict": a.strict, "timeframe": a.timeframe,
+                     "top": top, "counts": counts},
             "setups": {n: [{k: v for k, v in r.items() if k != "o"}
                            for r in by_setup[n][:top]] for n in chosen},
             "failed": [{"symbol": s, "reason": r} for s, r in failed],
@@ -619,7 +663,8 @@ def main(argv=None):
         print(f"NOTE: --top clamped to the {MAX_TOP}-name cap; a list longer than "
               f"that is not a shortlist.\n")
     print(render_header(scan_date, closed, os.path.basename(a.universe),
-                        len(pairs), a.strict, len(rows), failed, n_illiquid, counts))
+                        len(pairs), a.strict, len(rows), failed, n_illiquid,
+                        counts, a.timeframe))
 
     shortlist = []
     for name in chosen:

@@ -76,6 +76,9 @@ class _Stub:
         self.seen = []          # (strict, min_turnover) handed to evaluate
         self.diags = []         # the diag dict handed to evaluate, per symbol
         self.workers = []       # max_workers handed to ThreadPoolExecutor
+        self.compute_tf = []    # timeframe handed to A.compute, per symbol
+        self.eval_tf = []       # timeframe handed to setups.evaluate, per symbol
+        self.index_tf = []      # timeframe handed to index_returns
 
     def __enter__(self):
         import engine
@@ -84,13 +87,16 @@ class _Stub:
         self.engine = engine
         stub = self
 
-        def compute(sym, catalyst=5.0):
+        def compute(sym, catalyst=5.0, timeframe="daily"):
+            stub.compute_tf.append(timeframe)
             if stub.raise_exc is not None:
                 raise stub.raise_exc
             return {"symbol": sym, "returns": dict(stub.returns)}
 
-        def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
+        def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None,
+                     timeframe="daily"):
             stub.seen.append((strict, min_turnover))
+            stub.eval_tf.append(timeframe)
             stub.diags.append(diag)
             if diag is not None and stub.diag_fill:
                 diag.update(stub.diag_fill)
@@ -102,7 +108,11 @@ class _Stub:
             stub.workers.append(max_workers)
             return real_pool(max_workers=max_workers)
 
-        screener.index_returns = lambda: dict(stub.idx)
+        def index_returns(timeframe="daily"):
+            stub.index_tf.append(timeframe)
+            return dict(stub.idx)
+
+        screener.index_returns = index_returns
         engine.A.compute = compute
         screener.setups.evaluate = evaluate
         screener.ThreadPoolExecutor = pool

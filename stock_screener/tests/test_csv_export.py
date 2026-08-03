@@ -27,6 +27,7 @@ import setups
 # comparison catches it.
 EXPECTED_COLUMNS = [
     "scan_date", "last_closed_bar_date", "universe_name", "threshold_mode",
+    "bar_timeframe_daily_or_weekly",
     "symbol", "sector",
     "setup_name", "rank_within_setup", "setup_fit_score_0_to_10",
     "score_now_catalyst_neutral_0_to_10", "score_if_trigger_fires_0_to_10",
@@ -55,6 +56,7 @@ INTERNAL_TO_COLUMN = {
     "last_closed_bar": "last_closed_bar_date",
     "universe": "universe_name",
     "mode": "threshold_mode",
+    "timeframe": "bar_timeframe_daily_or_weekly",
     "setup": "setup_name",
     "rank": "rank_within_setup",
     "setup_fit": "setup_fit_score_0_to_10",
@@ -143,9 +145,10 @@ def scanned(symbol="TCS", matched=("LEADER",), sector="Information Technology"):
 
 
 def build(scan_rows, by_setup, chosen, scan_date="2026-08-02",
-          last_closed_bar="2026-07-31", universe="nifty500", mode="loosened"):
+          last_closed_bar="2026-07-31", universe="nifty500", mode="loosened",
+          timeframe="daily"):
     return csv_export.build_rows(scan_rows, by_setup, chosen, scan_date,
-                                 last_closed_bar, universe, mode)
+                                 last_closed_bar, universe, mode, timeframe)
 
 
 def read_back(path):
@@ -451,9 +454,9 @@ class TestVolumeColumns(unittest.TestCase):
 
 
 class TestSchema(unittest.TestCase):
-    def test_columns_are_the_agreed_thirty_one_in_order(self):
+    def test_columns_are_the_agreed_thirty_two_in_order(self):
         self.assertEqual(csv_export.COLUMNS, EXPECTED_COLUMNS)
-        self.assertEqual(len(csv_export.COLUMNS), 31)
+        self.assertEqual(len(csv_export.COLUMNS), 32)
 
     def test_the_up_down_ratio_sits_beside_relative_strength(self):
         """A universal metric, not an evidence slot: it means the same thing on
@@ -560,7 +563,8 @@ class TestSelfDescribingHeaders(unittest.TestCase):
         cannot slip in by being short.
         """
         exempt = {"scan_date", "last_closed_bar_date", "universe_name",
-                  "threshold_mode", "symbol", "sector", "setup_name",
+                  "threshold_mode", "bar_timeframe_daily_or_weekly",
+                  "symbol", "sector", "setup_name",
                   "rank_within_setup", "action_bucket",
                   "risk_reward_veto_applied",
                   "volume_signal_reading", "accumulation_trend_reading",
@@ -1644,7 +1648,7 @@ class TestWritePerSetup(unittest.TestCase):
             csv_export.write_per_setup(base, self._rows())
             self.assertFalse(os.path.exists(base))
 
-    def test_every_file_carries_the_full_thirty_one_column_header(self):
+    def test_every_file_carries_the_full_thirty_two_column_header(self):
         """A slice of the columns would make the per-setup files a different
         schema from the combined one, and no reader could union them."""
         with tmpdir() as d:
@@ -2227,7 +2231,7 @@ class TestMainCsvPerSetup(unittest.TestCase):
             self.assertEqual(os.listdir(d), ["scan.csv"])
             self.assertEqual(raw_lines(base), [",".join(EXPECTED_COLUMNS)])
 
-    def test_every_per_setup_file_carries_the_same_thirty_one_columns(self):
+    def test_every_per_setup_file_carries_the_same_thirty_two_columns(self):
         with tmpdir() as d:
             base = os.path.join(d, "scan.csv")
             run_main(["--setup", "leader,coiled", "--csv", base,

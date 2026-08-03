@@ -52,12 +52,22 @@ import os
 
 import setups
 
-# Thirty-one columns, in this order. The order is the schema -- a reader keying
+# Thirty-two columns, in this order. The order is the schema -- a reader keying
 # on position sees every value to the right of a moved column shift -- so new
 # columns go where they belong semantically and the whole list is asserted, not
 # sampled.
+#
+# bar_timeframe_daily_or_weekly sits beside threshold_mode because it is the
+# same kind of fact: what the scan was, rather than what it found. It is not
+# optional and it is not cosmetic -- every score, every period and every
+# evidence number in the row is measured in those bars, so two scans of the
+# same universe on two timeframes are different measurements of different
+# horizons, and a file that could not tell them apart would invite exactly the
+# concatenation that makes them one meaningless table. The name spells out the
+# scale the way the standing rule requires: `timeframe` alone would not say
+# whether the cell holds `1d`, `weekly`, `60` or `W1`.
 COLUMNS = ["scan_date", "last_closed_bar_date", "universe_name",
-           "threshold_mode",
+           "threshold_mode", "bar_timeframe_daily_or_weekly",
            "symbol", "sector",
            "setup_name", "rank_within_setup", "setup_fit_score_0_to_10",
            "score_now_catalyst_neutral_0_to_10",
@@ -431,7 +441,7 @@ def _flags(evidence):
 
 
 def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
-               universe, mode):
+               universe, mode, timeframe):
     """One dict per (symbol, setup), in `chosen` order and then in rank order.
 
     `by_setup` is screener.main's already-ranked {setup: [result rows]} map, in
@@ -445,6 +455,12 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
     `scan_rows` is scan()'s output, used only to answer "what else did this
     symbol match" -- which is asked of the whole scan, not of the chosen subset:
     a --setup coiled export still reports that a name is also a LEADER.
+
+    `timeframe` is REQUIRED, with no default. Every number in every row is
+    measured in those bars, so a default would let a caller that forgot to
+    thread the flag write a weekly scan into a file stamped `daily` -- and
+    nothing downstream could ever detect it. A missing argument is a TypeError
+    at the call site instead, which is the only place the mistake is visible.
     """
     matched_by_symbol = {
         r["symbol"]: [n for n in setups.SETUPS if n in r["matched"]]
@@ -479,6 +495,10 @@ def build_rows(scan_rows, by_setup, chosen, scan_date, last_closed_bar,
                 "last_closed_bar_date": date_cell(last_closed_bar),
                 "universe_name": universe,
                 "threshold_mode": mode,
+                # From the argument, never a literal: the whole point of the
+                # column is that it tells the truth about the run that produced
+                # the row.
+                "bar_timeframe_daily_or_weekly": timeframe,
                 "symbol": r["symbol"],
                 "sector": r["sector"],
                 "setup_name": name,

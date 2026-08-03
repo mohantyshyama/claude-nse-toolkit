@@ -23,13 +23,31 @@ def _truncate(rows, cutoff_iso):
     return [r for r in rows if str(r["t"]) <= cutoff_iso]
 
 
-def aligned_rows(o):
-    """Daily bars for a scored symbol, aligned to its last closed bar.
+def primary_request(timeframe):
+    """The (range, interval) pair compute() fetches for `timeframe`.
 
-    A._CACHE already holds this series from compute(), so this is a cache hit
-    and costs no network.
+    Read out of A.TIMEFRAMES rather than restated here. A second copy of "2y",
+    "1d" in this file is exactly how a scan ends up deriving its series from
+    daily bars while the scores beside them were computed on weekly ones -- the
+    two would agree today and drift the first time either is edited.
     """
-    rows, _ = A.fetch(o["symbol"], "2y", "1d")
+    if timeframe not in A.TIMEFRAMES:
+        raise SystemExit(f"ERROR: unknown timeframe {timeframe!r} - use "
+                         f"{' or '.join(sorted(A.TIMEFRAMES))}.")
+    return A.TIMEFRAMES[timeframe]["primary"]
+
+
+def aligned_rows(o, timeframe="daily"):
+    """Primary bars for a scored symbol, aligned to its last closed bar.
+
+    The PRIMARY series, whichever timeframe the scan is running: every window
+    below counts bars, so a weekly scan must derive them from the same weekly
+    bars compute() scored, not from daily ones.
+
+    Because it is the same request compute() made, A._CACHE already holds this
+    series and the call is a cache hit costing no network.
+    """
+    rows, _ = A.fetch(o["symbol"], *primary_request(timeframe))
     return _truncate(rows, o["last_closed_bar"]["t"])
 
 
@@ -1657,9 +1675,16 @@ def _ctx_from_rows(rows, rs):
             "ud_20": ud_ratio(rows, UD_SHORT_BARS)}
 
 
-def build_ctx(o, rs):
-    """Public entry: derive every context value for a scored symbol."""
-    rows = aligned_rows(o)
+def build_ctx(o, rs, timeframe="daily"):
+    """Public entry: derive every context value for a scored symbol.
+
+    `timeframe` selects the bars, and must be the SAME one `o` was computed on
+    -- every value in the returned dict is a bar count (50 for the up/down
+    ratio, 126 for the ATR percentile, 60 for the cross lookback), so mixing a
+    weekly score with a daily context would silently measure two horizons at
+    once.
+    """
+    rows = aligned_rows(o, timeframe)
     o["_rows"] = rows          # _no_down_thrust reads this to date recent bars
     return _ctx_from_rows(rows, rs)
 
@@ -1743,7 +1768,8 @@ def _add_confluence(matched):
     return matched
 
 
-def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
+def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None,
+             timeframe="daily"):
     """Every setup a scored symbol matches, with its fit and evidence.
 
     Tri-state return, and the three states are NOT interchangeable:
@@ -1763,6 +1789,13 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
     nothing to divide by; the two labels are ALWAYS strings, "unknown" being the
     reading of a ratio that could not be measured.
 
+    `timeframe` must match the one `o` was computed on. It reaches only
+    build_ctx: every predicate reads `o` and `ctx`, and both already carry the
+    primary series, so no predicate needs to know which timeframe produced it.
+    On weekly, `o["rsi"]["daily"]`, `o["macd"]["daily"]` and `o["atr"]["daily"]`
+    carry the WEEKLY series -- see compute()'s docstring on the slot names --
+    which is why the five predicates read weekly numbers without being changed.
+
     Callers must test ``is None``, never truthiness: both non-match states are
     falsy, and collapsing them makes the scan header report several hundred
     liquid-but-quiet names as "below turnover floor", which is a lie about what
@@ -1779,7 +1812,7 @@ def evaluate(o, rs, strict=False, min_turnover=3.0, diag=None):
     second one. An illiquid symbol never reaches a predicate, so it contributes
     nothing to the funnel; the caller already counts the gate separately.
     """
-    ctx = build_ctx(o, rs)
+    ctx = build_ctx(o, rs, timeframe)
     if not liquid(ctx, min_turnover):
         return None
     matched = {}
